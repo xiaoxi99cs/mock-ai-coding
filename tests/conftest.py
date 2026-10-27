@@ -19,6 +19,12 @@ def clock():
     return FakeClock()
 
 
+class Store(TaskStore):
+    def submit_task(self, *a, **kw):
+        return self.submit(*a, **kw)[0]
+
+
 @pytest.fixture
 def store(tmp_path, clock):
-    return TaskStore(str(tmp_path / "t.db"), clock=clock)
+    # rng=1.0: full jitter at its upper bound, so backoff is deterministic in tests
+    return Store(str(tmp_path / "t.db"), clock=clock, rng=lambda: 1.0)

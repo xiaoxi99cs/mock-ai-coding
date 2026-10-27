@@ -4,12 +4,12 @@ from fastapi.testclient import TestClient
 from taskconsole.api import create_app
 from taskconsole.handlers import TaskCancelled, TaskContext
 from taskconsole.states import IllegalTransition, Status, check_transition
-from taskconsole.store import NotOwner
+from taskconsole.store import LeaseLost
 from taskconsole.worker import Worker
 
 
 def statuses(store, tid):
-    return [e["to_status"] for e in store.events(tid)]
+    return [e["to_status"] for e in store.events(tid) if e["kind"] == "transition"]
 
 
 def test_transition_table():
@@ -21,7 +21,7 @@ def test_transition_table():
 
 
 def test_happy_path(store):
-    t = store.submit("sleep", {"seconds": 0})
+    t = store.submit_task("sleep", {"seconds": 0})
     assert t["status"] == "PENDING"
     Worker(store, worker_id="w1").run_one()
     t = store.get(t["id"])
@@ -30,7 +30,7 @@ def test_happy_path(store):
 
 
 def test_retry_then_succeed_with_backoff(store, clock):
-    t = store.submit("flaky", {"fail_times": 2, "seconds": 0}, max_attempts=3)
+    t = store.submit_task("flaky", {"fail_times": 2, "seconds": 0}, max_attempts=3)
     w = Worker(store, worker_id="w1")
     w.run_one()
     t1 = store.get(t["id"])
@@ -46,7 +46,7 @@ def test_retry_then_succeed_with_backoff(store, clock):
 
 
 def test_attempts_exhausted_goes_dead(store, clock):
-    t = store.submit("flaky", {"fail_times": 5, "seconds": 0}, max_attempts=2)
+    t = store.submit_task("flaky", {"fail_times": 5, "seconds": 0}, max_attempts=2)
     w = Worker(store, worker_id="w1")
     w.run_one()
     clock.advance(10)
@@ -56,57 +56,58 @@ def test_attempts_exhausted_goes_dead(store, clock):
 
 
 def test_non_retryable_fails_immediately(store):
-    t = store.submit("fail_permanent", {}, max_attempts=5)
+    t = store.submit_task("fail_permanent", {}, max_attempts=5)
     Worker(store, worker_id="w1").run_one()
     t = store.get(t["id"])
     assert t["status"] == "FAILED" and t["attempts"] == 1
 
 
 def test_unknown_type_is_non_retryable(store):
-    t = store.submit("nope", {})
+    t = store.submit_task("nope", {})
     Worker(store).run_one()
     assert store.get(t["id"])["status"] == "FAILED"
 
 
 def test_cancel_pending_and_terminal(store):
-    t = store.submit("sleep", {})
+    t = store.submit_task("sleep", {})
     assert store.cancel(t["id"])["status"] == "CANCELLED"
     with pytest.raises(IllegalTransition):
         store.cancel(t["id"])
 
 
 def test_cancel_running_is_cooperative(store):
-    t = store.submit("sleep", {"seconds": 0})
+    t = store.submit_task("sleep", {"seconds": 0})
     claimed = store.claim("default", "w1")
-    store.start(t["id"], "w1")
+    store.start(t["id"], claimed["fence"], "w1")
     assert store.cancel(t["id"])["status"] == "RUNNING"  # only flagged
     ctx = TaskContext(store, claimed, "w1")
     with pytest.raises(TaskCancelled):
         ctx.progress(0.1)  # the handler notices at its next progress call
-    store.mark_cancelled(t["id"], "w1")
+    store.mark_cancelled(t["id"], claimed["fence"], "w1")
     assert store.get(t["id"])["status"] == "CANCELLED"
 
 
-def test_only_owner_can_write(store):
-    t = store.submit("sleep", {})
-    store.claim("default", "w1")
-    with pytest.raises(NotOwner):
-        store.start(t["id"], "w2")
+def test_only_current_fence_can_write(store):
+    t = store.submit_task("sleep", {})
+    claimed = store.claim("default", "w1")
+    with pytest.raises(LeaseLost):
+        store.start(t["id"], claimed["fence"] - 1, "w2")
 
 
 def test_timeout_is_retryable(store):
-    t = store.submit("sleep", {"seconds": 2}, timeout_s=0.2)
+    t = store.submit_task("sleep", {"seconds": 2}, timeout_s=0.2)
     Worker(store).run_one()
     t = store.get(t["id"])
     assert t["status"] == "RETRY_WAIT" and "TaskTimeout" in t["error"]
 
 
 def test_checkpoint_resume(store, clock):
-    t = store.submit("count_primes", {"n": 1000, "chunks": 4}, pool="cpu")
+    t = store.submit_task("count_primes", {"n": 1000, "chunks": 4}, pool="cpu")
     claimed = store.claim("cpu", "w1")
-    store.start(t["id"], "w1")
-    store.report_progress(t["id"], "w1", 0.5, {"chunk": 2, "count": 95})
-    store.fail(t["id"], "w1", "boom")
+    f = claimed["fence"]
+    store.start(t["id"], f, "w1")
+    store.report_progress(t["id"], f, "w1", 0.5, {"chunk": 2, "count": 95})
+    store.fail(t["id"], f, "w1", "boom")
     clock.advance(5)
     Worker(store, pool="cpu", worker_id="w2").run_one()
     t = store.get(t["id"])
@@ -128,3 +129,27 @@ def test_api_roundtrip(tmp_path):
         assert c.post(f"/api/tasks/{tid}/cancel").status_code == 409
         assert c.get("/api/tasks/missing").status_code == 404
         assert [t["id"] for t in c.get("/api/tasks?status=CANCELLED").json()] == [tid]
+
+
+def test_terminal_states_have_no_exits():
+    for frm in ("SUCCEEDED", "FAILED", "DEAD", "CANCELLED"):
+        for to in Status:
+            with pytest.raises(IllegalTransition):
+                check_transition(frm, to)
+
+
+def test_cancel_retry_wait(store):
+    t = store.submit_task("flaky", {"fail_times": 5, "seconds": 0})
+    Worker(store).run_one()
+    assert store.get(t["id"])["status"] == "RETRY_WAIT"
+    assert store.cancel(t["id"])["status"] == "CANCELLED"
+
+
+def test_pool_isolation_and_priority(store):
+    low = store.submit_task("sleep", {}, priority=0)
+    high = store.submit_task("sleep", {}, priority=5)
+    cpu = store.submit_task("count_primes", {}, pool="cpu")
+    assert store.claim("default", "w1")["id"] == high["id"]
+    assert store.claim("default", "w1")["id"] == low["id"]
+    assert store.claim("default", "w1") is None  # never takes another pool's task
+    assert store.claim("cpu", "w2")["id"] == cpu["id"]

@@ -33,18 +33,18 @@ CREATED ─► PENDING ─► CLAIMED ─► RUNNING ─► SUCCEEDED
 - [x] Basic console page; unit tests for the state machine
 
 ### Phase 2: scaling and error handling
-1. [ ] Worker pools + supervisor (restarts dead worker processes); atomic claiming
+1. [x] Worker pools + supervisor (restarts dead worker processes); atomic claiming
    (single `UPDATE … WHERE id=(SELECT …) RETURNING`)
-2. [ ] Retry with exponential backoff + full jitter (capped)
-3. [ ] Leasing: lease renewed by heartbeat; expired leases recovered in the claim path
+2. [x] Retry with exponential backoff + full jitter (capped)
+3. [x] Leasing: lease renewed by heartbeat; expired leases recovered in the claim path
    (no separate reaper); crashes count as attempts (poison pill -> DEAD)
-4. [ ] Fencing tokens: `fence` incremented on every claim; every worker write is
+4. [x] Fencing tokens: `fence` incremented on every claim; every worker write is
    `WHERE id=? AND fence=?`; stale (zombie) writes are rejected and counted;
    a worker that loses its lease stops
-5. [ ] Idempotency: submission key (unique; same key returns the existing task,
+5. [x] Idempotency: submission key (unique; same key returns the existing task,
    different body -> 409) + side-effect ledger keyed `task_id:step`, also passed
    to the (fake) payment/email provider as its idempotency key
-6. [ ] Heartbeats: `workers` table, alive/stale/dead; hard timeout enforced by the
+6. [x] Heartbeats: `workers` table, alive/stale/dead; hard timeout enforced by the
    worker exiting (the supervisor restarts it); graceful drain on SIGTERM
    (finish the task or release the lease)
 
@@ -65,6 +65,8 @@ Authentication, distributed brokers (Redis/RabbitMQ), task DAGs, cron scheduling
 WebSocket push, multiple machines.
 
 ## Conventions
+- Signal handlers only set flags; never touch the DB from one (it may interrupt a transaction).
+- Worker heartbeats must keep running during any grace period (timeout, drain), or the lease expires.
 - One clock: the store's `clock` callable (injectable in tests); all processes run on one host.
 - Worker-side writes must always carry the fencing token (from Phase 2 on).
 - Commit at the end of each phase; update the checkboxes above.
