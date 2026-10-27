@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(pool, status, run_after);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_finished ON tasks(finished_at);
 
 CREATE TABLE IF NOT EXISTS task_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS task_events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_task ON task_events(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON task_events(kind, id);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON task_events(ts);
 
 CREATE TABLE IF NOT EXISTS workers (
     id              TEXT PRIMARY KEY,

@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import handlers
+from . import demos, handlers, metrics
 from .states import IllegalTransition
 from .store import IdempotencyConflict, TaskNotFound, TaskStore
 from .supervisor import Supervisor
@@ -137,6 +137,9 @@ def create_app(db_path: str = "tasks.db", start_workers: bool = True, pools: dic
     @app.get("/api/effects")
     def effects():
         return store.external_effects()
+
+    metrics.register(app, store, sup, heartbeat_s=heartbeat_s)
+    demos.register(app, store, sup)
 
     @app.get("/")
     def index():

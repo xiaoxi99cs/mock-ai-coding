@@ -4,49 +4,721 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Async Task Console</title>
 <style>
-  body { font: 14px system-ui, sans-serif; margin: 16px; background: #fafafa; color: #222; }
-  table { border-collapse: collapse; width: 100%; background: #fff; }
-  th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; }
-  form { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
-  textarea { width: 260px; height: 32px; }
-  pre { background: #fff; padding: 8px; max-height: 300px; overflow: auto; }
+  :root {
+    --bg: #f4f5f7; --panel: #fff; --line: #e3e5e9; --line2: #eef0f3; --text: #1c1f24; --muted: #6b7280;
+    --accent: #2f5bd3; --accent-bg: #eaf0fd;
+    --st-created: #8b95a5; --st-pending: #2f5bd3; --st-claimed: #7c4dce; --st-running: #0a8fb8;
+    --st-retry: #c77700; --st-succeeded: #1f8a4c; --st-failed: #c62f3b; --st-dead: #3b1f24; --st-cancelled: #7a7f87;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: #1c2230; color: #e8ebf2;
+           position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  header .sub { color: #9aa3b5; font-size: 12px; }
+  header .spacer { flex: 1; }
+  .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #c7cede; }
+  .conn i { width: 8px; height: 8px; border-radius: 50%; background: #9aa3b5; display: inline-block; }
+  .conn.ok i { background: #3ccf7a; } .conn.err i { background: #ff5a5f; }
+  main { padding: 12px 16px 40px; max-width: 1600px; margin: 0 auto; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; min-width: 0;
+          border-left: 3px solid var(--line); }
+  .tile .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; white-space: nowrap;
+             overflow: hidden; text-overflow: ellipsis; }
+  .tile .v { font: 600 20px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+  .tile .s { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile.clickable { cursor: pointer; } .tile.clickable:hover { background: #fafbfc; }
+  .tile.hot .v { color: var(--st-failed); }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) 460px; gap: 12px; align-items: start; }
+  .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  @media (max-width: 1100px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+  section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+  .panel > h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: #3d434d; margin: 0;
+                padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; }
+  .panel > h2 .right { margin-left: auto; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--muted); }
+  .panel .body { padding: 10px 12px; }
+  .note { color: var(--muted); font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--line2); vertical-align: middle; }
+  th { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .4px;
+       background: #fafbfc; position: sticky; top: 0; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .scroll { overflow: auto; }
+  .tablewrap { max-height: 560px; overflow: auto; }
+  tr.sel td { background: var(--accent-bg); }
+  tbody tr:hover td { background: #f8f9fb; }
+  a.tid { color: var(--accent); text-decoration: none; font-family: var(--mono); font-size: 12px; cursor: pointer; }
+  a.tid:hover { text-decoration: underline; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600;
+           letter-spacing: .3px; color: #fff; background: var(--st-created); white-space: nowrap; }
+  .b-CREATED { background: var(--st-created); } .b-PENDING { background: var(--st-pending); }
+  .b-CLAIMED { background: var(--st-claimed); } .b-RUNNING { background: var(--st-running); }
+  .b-RETRY_WAIT { background: var(--st-retry); } .b-SUCCEEDED { background: var(--st-succeeded); }
+  .b-FAILED { background: var(--st-failed); } .b-DEAD { background: var(--st-dead); }
+  .b-CANCELLED { background: var(--st-cancelled); }
+  .w-idle { background: #1f8a4c; } .w-busy { background: #0a8fb8; } .w-starting { background: #8b95a5; }
+  .w-draining { background: #c77700; } .w-paused { background: #7c4dce; } .w-stale { background: #d4a106; color: #222; }
+  .w-stopped { background: #9aa0a8; } .w-dead { background: #c62f3b; }
+  .t-CREATED { border-left-color: var(--st-created); } .t-PENDING { border-left-color: var(--st-pending); }
+  .t-CLAIMED { border-left-color: var(--st-claimed); } .t-RUNNING { border-left-color: var(--st-running); }
+  .t-RETRY_WAIT { border-left-color: var(--st-retry); } .t-SUCCEEDED { border-left-color: var(--st-succeeded); }
+  .t-FAILED { border-left-color: var(--st-failed); } .t-DEAD { border-left-color: var(--st-dead); }
+  .t-CANCELLED { border-left-color: var(--st-cancelled); }
+  .bar { height: 6px; background: #eceef2; border-radius: 3px; overflow: hidden; width: 70px; display: inline-block;
+         vertical-align: middle; }
+  .bar > i { display: block; height: 100%; background: var(--st-running); }
+  .cd { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .cd.lease { color: #7c4dce; } .cd.retry { color: var(--st-retry); } .cd.expired { color: var(--st-failed); font-weight: 600; }
+  .err { color: var(--st-failed); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button { font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid #c9cdd4; background: #fff; border-radius: 4px;
+           cursor: pointer; color: var(--text); }
+  button:hover { background: #f2f4f7; } button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { background: #244bb5; }
+  button.danger { color: var(--st-failed); border-color: #e6b8bc; }
+  button.xs { padding: 1px 6px; font-size: 11px; }
+  input, select, textarea { font: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid #c9cdd4; border-radius: 4px;
+                            background: #fff; color: var(--text); min-width: 0; }
+  textarea { font-family: var(--mono); width: 100%; resize: vertical; min-height: 64px; }
+  label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); min-width: 0; }
+  .form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .form .wide { grid-column: 1 / -1; }
+  .form .desc { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
+  .msg { font-size: 12px; margin-top: 6px; min-height: 16px; }
+  .msg.ok { color: var(--st-succeeded); } .msg.bad { color: var(--st-failed); }
+  .toolbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  .chip { border: 1px solid #c9cdd4; background: #fff; border-radius: 12px; padding: 1px 9px; font-size: 12px; cursor: pointer; }
+  .chip.on { background: var(--text); color: #fff; border-color: var(--text); }
+  .chip .n { font-family: var(--mono); font-size: 11px; opacity: .75; margin-left: 4px; }
+  .pool { border-top: 1px solid var(--line); }
+  .pool:first-child { border-top: 0; }
+  .poolhead { display: flex; align-items: center; gap: 8px; padding: 7px 12px; background: #fafbfc; flex-wrap: wrap; }
+  .poolhead b { font-family: var(--mono); }
+  .poolhead .q { font-size: 11px; color: var(--muted); }
+  .stepper { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; }
+  .stepper .n { font: 600 13px var(--mono); min-width: 20px; text-align: center; }
+  .wk td { font-size: 12px; white-space: nowrap; padding: 4px 6px; }
+  td.nw { white-space: nowrap; }
+  .wk .acts { white-space: nowrap; text-align: right; }
+  .chart { width: 100%; height: 170px; display: block; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11px; color: var(--muted); padding: 0 12px 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .demos { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .demo { text-align: left; padding: 6px 8px; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .demo b { font-size: 12px; } .demo span { font-size: 11px; color: var(--muted); overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .demo.running { border-color: var(--st-running); background: #eef9fd; }
+  .runs { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow: auto; }
+  .run { border: 1px solid var(--line); border-radius: 5px; }
+  .run .rh { display: flex; gap: 8px; align-items: center; padding: 5px 8px; background: #fafbfc; border-bottom: 1px solid var(--line2);
+             cursor: pointer; font-size: 12px; }
+  .run .rh .t { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .run .watch { padding: 4px 8px; font-size: 11px; color: #5a4a00; background: #fff8db; border-bottom: 1px solid var(--line2); }
+  .run ol { list-style: none; margin: 0; padding: 4px 8px; font-size: 12px; }
+  .run li { display: flex; gap: 8px; padding: 1px 0; }
+  .run li .ts { color: var(--muted); font-family: var(--mono); font-size: 11px; flex: none; width: 46px; text-align: right; }
+  .run li .m { min-width: 0; overflow-wrap: anywhere; }
+  .rs-running { background: var(--st-running); } .rs-done { background: var(--st-succeeded); } .rs-error { background: var(--st-failed); }
+  .dup td { background: #fdecee; } .dup .dupn { color: var(--st-failed); font-weight: 700; }
+  /* drawer */
+  #shade { position: fixed; inset: 0; background: rgba(20,24,32,.25); z-index: 9; display: none; }
+  #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(640px, 100vw); background: var(--panel); z-index: 10;
+            box-shadow: -8px 0 24px rgba(0,0,0,.12); transform: translateX(105%); transition: transform .16s ease;
+            display: flex; flex-direction: column; }
+  body.drawer-open #drawer { transform: none; } body.drawer-open #shade { display: block; }
+  #drawer .dh { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  #drawer .dh .id { font: 600 13px var(--mono); }
+  #drawer .dh .x { margin-left: auto; }
+  #drawer .db { overflow: auto; padding: 12px 14px; flex: 1; }
+  dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 14px; margin: 0 0 12px; font-size: 12px; }
+  dl.kv dt { color: var(--muted); } dl.kv dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+  h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin: 14px 0 6px; }
+  pre.json { background: #f6f7f9; border: 1px solid var(--line2); border-radius: 4px; padding: 8px; margin: 0;
+             font: 12px/1.4 var(--mono); max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+  pre.json.bad { background: #fdf1f2; border-color: #f2cdd1; color: #8d1c27; }
+  .tl { list-style: none; margin: 0; padding: 0 0 0 4px; }
+  .tl li { position: relative; padding: 4px 0 8px 18px; border-left: 2px solid var(--line); font-size: 12px; }
+  .tl li::before { content: ""; position: absolute; left: -6px; top: 7px; width: 10px; height: 10px; border-radius: 50%;
+                   background: var(--st-pending); border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line); }
+  .tl li.k-info::before { background: #b9c0cc; width: 8px; height: 8px; left: -5px; top: 8px; }
+  .tl li.k-info .m { color: #4b5361; }
+  .tl li.k-rejected { background: #fdf1f2; }
+  .tl li.k-rejected::before { background: var(--st-failed); border-radius: 2px; }
+  .tl li.k-rejected .m { color: #8d1c27; font-weight: 600; }
+  .tl .meta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .tl .tr { display: flex; gap: 6px; align-items: center; margin: 2px 0; }
+  .kindtag { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; padding: 0 5px; border-radius: 3px;
+             border: 1px solid currentColor; }
+  .empty { color: var(--muted); padding: 14px 12px; text-align: center; font-size: 12px; }
+  .hide-sm { } @media (max-width: 700px) { .hide-sm { display: none; } .form { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .demos { grid-template-columns: minmax(0,1fr); } header .sub { display: none; } main { padding: 10px 8px 30px; } }
 </style>
 </head>
 <body>
-<h1>Async Task Console</h1>
-<form id="submit">
-  <select name="type" id="type"></select>
-  <textarea name="payload" id="payload">{}</textarea>
-  <input name="max_attempts" type="number" value="3" min="1" style="width:60px">
-  <button>Submit</button>
-</form>
-<table><thead><tr><th>id</th><th>type</th><th>pool</th><th>status</th><th>attempts</th><th>progress</th><th>error</th><th></th></tr></thead>
-<tbody id="rows"></tbody></table>
-<pre id="detail"></pre>
+<header>
+  <h1>Async Task Console</h1>
+  <span class="sub">durable queue &middot; SQLite WAL &middot; leases &middot; fencing</span>
+  <span class="spacer"></span>
+  <span class="sub mono" id="clock"></span>
+  <span class="conn" id="conn"><i></i><span>connecting</span></span>
+</header>
+<main>
+  <div class="tiles" id="tiles"></div>
+  <div class="grid">
+    <div class="col">
+      <section class="panel">
+        <h2>Throughput <span class="right" id="tpinfo"></span></h2>
+        <div id="chartwrap"></div>
+        <div class="legend" id="legend"></div>
+      </section>
+      <section class="panel">
+        <h2>Tasks <span class="right" id="taskinfo"></span></h2>
+        <div class="toolbar" id="filters"></div>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>id</th><th>type</th><th class="hide-sm">pool</th><th>status</th><th class="num">att.</th>
+              <th>progress</th><th>timer</th><th class="hide-sm">worker</th><th class="hide-sm">error</th><th></th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Side-effects ledger <span class="right">fake payment / email provider, keyed by idempotency key</span></h2>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>idempotency key</th><th>kind</th><th class="hide-sm">detail</th><th class="num">dup. calls</th><th class="num hide-sm">at</th></tr></thead>
+            <tbody id="effects"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+    <div class="col">
+      <section class="panel">
+        <h2>Pools &amp; workers <span class="right" id="wkinfo"></span></h2>
+        <div id="pools"></div>
+      </section>
+      <section class="panel">
+        <h2>Demo scenarios</h2>
+        <div class="body">
+          <div class="demos" id="demos"><div class="note">loading&hellip;</div></div>
+          <div class="runs" id="runs"></div>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Submit task</h2>
+        <div class="body">
+          <form id="submit" class="form" autocomplete="off">
+            <label>type<select id="f-type"></select></label>
+            <label>pool<select id="f-pool"></select></label>
+            <label>priority<input id="f-priority" type="number" value="0"></label>
+            <div class="desc" id="f-desc"></div>
+            <label class="wide">payload (JSON)<textarea id="f-payload" spellcheck="false">{}</textarea></label>
+            <label>max_attempts<input id="f-attempts" type="number" value="3" min="1" max="20"></label>
+            <label>timeout_s<input id="f-timeout" type="number" value="60" min="0.1" step="any"></label>
+            <label>count<input id="f-count" type="number" value="1" min="1" max="100"></label>
+            <label class="wide">idempotency_key (optional)<input id="f-key" placeholder="e.g. order-1234"></label>
+            <div class="wide" style="display:flex;gap:8px;align-items:center">
+              <button class="primary" type="submit">Submit</button>
+              <span class="msg" id="f-msg"></span>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
+  </div>
+</main>
+<div id="shade"></div>
+<aside id="drawer" aria-hidden="true">
+  <div class="dh" id="d-head"></div>
+  <div class="db" id="d-body"></div>
+</aside>
 <script>
-const api = (p, o) => fetch(p, o).then(r => r.json());
-let types = {};
-api('/api/task-types').then(t => {
-  types = t;
-  type.innerHTML = Object.keys(t).map(k => `<option>${k}</option>`).join('');
-  type.onchange = () => payload.value = JSON.stringify(types[type.value].example);
-  type.onchange();
-});
-submit.onsubmit = async e => {
-  e.preventDefault();
-  await api('/api/tasks', {method: 'POST', headers: {'content-type': 'application/json'},
-    body: JSON.stringify({type: type.value, payload: JSON.parse(payload.value), max_attempts: +submit.max_attempts.value})});
-  refresh();
-};
-async function refresh() {
-  const tasks = await api('/api/tasks');
-  rows.innerHTML = tasks.map(t => `<tr><td><a href="#" onclick="show('${t.id}')">${t.id}</a></td><td>${t.type}</td><td>${t.pool}</td>
-    <td>${t.status}</td><td>${t.attempts}/${t.max_attempts}</td><td>${Math.round(t.progress * 100)}%</td><td>${t.error ?? ''}</td>
-    <td><button onclick="cancelTask('${t.id}')">cancel</button></td></tr>`).join('');
+"use strict";
+const STATUSES = ["CREATED", "PENDING", "CLAIMED", "RUNNING", "RETRY_WAIT", "SUCCEEDED", "FAILED", "DEAD", "CANCELLED"];
+const TERMINAL = new Set(["SUCCEEDED", "FAILED", "DEAD", "CANCELLED"]);
+const SERIES = [["succeeded", "#1f8a4c"], ["failed", "#c62f3b"], ["dead", "#3b1f24"], ["cancelled", "#9aa0a8"]];
+const $ = id => document.getElementById(id);
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const fmtNum = n => n == null ? "–" : Number(n).toLocaleString();
+const fmtSec = s => s == null ? "–" : s < 1 ? `${Math.round(s * 1000)}ms` : s < 100 ? `${s.toFixed(1)}s` : `${Math.round(s)}s`;
+const shortId = id => esc(String(id).slice(0, 8));
+
+class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  let body = null;
+  const text = await r.text();
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!r.ok) throw new HttpError(r.status, (body && body.detail) ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : `HTTP ${r.status}`);
+  return body;
 }
-async function show(id) { detail.textContent = JSON.stringify(await api(`/api/tasks/${id}`), null, 2); }
-async function cancelTask(id) { await api(`/api/tasks/${id}/cancel`, {method: 'POST'}); refresh(); }
-refresh(); setInterval(refresh, 1000);
+const post = (path, data, method = "POST") => api(path, {method, headers: {"content-type": "application/json"},
+                                                      body: data === undefined ? undefined : JSON.stringify(data)});
+
+// ---- server clock: metrics.now + local elapsed for smooth countdowns ----
+const clock = {offset: null};
+function syncClock(serverNow) { if (typeof serverNow === "number") clock.offset = serverNow - performance.now() / 1000; }
+function now() { return clock.offset == null ? Date.now() / 1000 : clock.offset + performance.now() / 1000; }
+function ago(ts) { if (ts == null) return "–"; const d = now() - ts; return d < 0 ? "now" : fmtSec(d) + " ago"; }
+
+const state = {
+  types: {}, pools: {}, metrics: null, metricsAvail: true, tasks: [], workers: [], effects: [],
+  filter: "", poolFilter: "", demos: null, demosAvail: true, runs: [], openRuns: new Set(), selected: null, detail: null,
+  pendingPool: {},
+};
+
+// ---- tiles ----
+function tile(label, value, sub, cls = "", attrs = "") {
+  return `<div class="tile ${cls}" ${attrs}><div class="k" title="${esc(label)}">${esc(label)}</div>` +
+         `<div class="v">${esc(value)}</div><div class="s">${esc(sub ?? "")}</div></div>`;
+}
+function renderTiles() {
+  const m = state.metrics;
+  let counts = {};
+  if (m && m.status_counts) counts = m.status_counts;
+  else { for (const t of state.tasks) counts[t.status] = (counts[t.status] || 0) + 1; }
+  const html = [];
+  for (const s of STATUSES) {
+    if (s === "CREATED" && !counts[s]) continue;
+    html.push(tile(s.replace("_", " ").toLowerCase(), fmtNum(counts[s] || 0), state.filter === s ? "filter on" : "",
+                   `t-${s} clickable`, `data-filter="${s}"`));
+  }
+  if (m) {
+    const qd = m.queue_depth || {};
+    let ready = 0, delayed = 0, running = 0;
+    const per = [];
+    for (const [p, q] of Object.entries(qd)) { ready += q.ready || 0; delayed += q.delayed || 0; running += q.running || 0;
+      per.push(`${p} ${q.ready || 0}`); }
+    html.push(tile("queue ready", fmtNum(ready), per.join(" · ") || "no pools"));
+    html.push(tile("queue delayed", fmtNum(delayed), "backoff / run_after"));
+    const c = m.counters || {};
+    const ctr = [["retries", "retries", "retryable errors"], ["lease_expirations", "lease recov.", "expired leases reclaimed"],
+                 ["fenced_writes_rejected", "fenced rejects", "zombie writes blocked"],
+                 ["idempotent_submits_deduplicated", "dedup hits", "same-key submits"], ["worker_restarts", "restarts", "by supervisor"],
+                 ["provider_duplicates_blocked", "provider dups", "blocked by idem. key"],
+                 ["effects_skipped_already_done", "effects skipped", "ledger: already done"]];
+    for (const [k, label, sub] of ctr) {
+      const hot = (k === "fenced_writes_rejected" || k === "lease_expirations") && (c[k] || 0) > 0;
+      html.push(tile(label, fmtNum(c[k] || 0), sub, hot ? "hot" : "", `title="counter ${esc(k)}"`));
+    }
+    const L = m.latency || {};
+    const w = L.wait || {}, r = L.run || {};
+    html.push(tile("wait p50", fmtSec(w.p50), `p95 ${fmtSec(w.p95)} · n=${w.n ?? 0} (5m)`));
+    html.push(tile("run p50", fmtSec(r.p50), `p95 ${fmtSec(r.p95)} · n=${r.n ?? 0} (5m)`));
+    const wk = m.workers || {};
+    html.push(tile("workers", `${wk.alive ?? 0}`, `stale ${wk.stale ?? 0} · dead ${wk.dead ?? 0}`, (wk.stale || wk.dead) ? "hot" : ""));
+  } else {
+    html.push(tile("metrics", "n/a", "/api/metrics not available"));
+  }
+  $("tiles").innerHTML = html.join("");
+}
+$("tiles").addEventListener("click", e => {
+  const t = e.target.closest("[data-filter]"); if (!t) return;
+  state.filter = state.filter === t.dataset.filter ? "" : t.dataset.filter;
+  renderFilters(); renderTiles(); refreshTasks();
+});
+
+// ---- throughput chart (inline SVG, stacked bars) ----
+function renderChart() {
+  const m = state.metrics;
+  const wrap = $("chartwrap");
+  if (!m || !m.throughput || !Array.isArray(m.throughput.series)) {
+    wrap.innerHTML = `<div class="empty">${state.metricsAvail ? "waiting for metrics…" : "throughput unavailable (/api/metrics not found)"}</div>`;
+    $("legend").innerHTML = ""; $("tpinfo").textContent = ""; return;
+  }
+  const series = m.throughput.series, bs = m.throughput.bucket_s || 5;
+  const W = Math.max(320, wrap.clientWidth || 600), H = 170, padL = 30, padR = 8, padT = 10, padB = 20;
+  const totals = series.map(b => SERIES.reduce((a, [k]) => a + (b[k] || 0), 0));
+  const maxV = Math.max(1, ...totals);
+  const nice = maxV <= 5 ? Math.max(1, maxV) : Math.ceil(maxV / 5) * 5;
+  const n = Math.max(1, series.length), cw = (W - padL - padR) / n, bw = Math.max(1, cw - 2);
+  const y = v => padT + (H - padT - padB) * (1 - v / nice);
+  let svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="throughput">`;
+  for (let i = 0; i <= 4; i++) {
+    const v = nice * i / 4, yy = y(v);
+    svg += `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="#eef0f3"/>`;
+    svg += `<text x="${padL - 4}" y="${yy + 3}" font-size="10" text-anchor="end" fill="#8b95a5">${Number.isInteger(v) ? v : v.toFixed(1)}</text>`;
+  }
+  series.forEach((b, i) => {
+    let acc = 0; const x = padL + i * cw + 1;
+    const tip = `${new Date(b.t * 1000).toLocaleTimeString()}: ` + SERIES.map(([k]) => `${k} ${b[k] || 0}`).join(", ");
+    svg += `<g><title>${esc(tip)}</title>`;
+    for (const [k, color] of SERIES) {
+      const v = b[k] || 0; if (!v) continue;
+      const y1 = y(acc + v), y0 = y(acc);
+      svg += `<rect x="${x.toFixed(1)}" y="${y1.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(0.5, y0 - y1).toFixed(1)}" fill="${color}"/>`;
+      acc += v;
+    }
+    svg += `<rect x="${x.toFixed(1)}" y="${padT}" width="${bw.toFixed(1)}" height="${H - padT - padB}" fill="transparent"/></g>`;
+  });
+  const span = n * bs;
+  svg += `<text x="${padL}" y="${H - 5}" font-size="10" fill="#8b95a5">-${Math.round(span / 60) >= 1 ? Math.round(span / 60) + "m" : span + "s"}</text>`;
+  svg += `<text x="${W - padR}" y="${H - 5}" font-size="10" text-anchor="end" fill="#8b95a5">now</text>`;
+  svg += `<line x1="${padL}" x2="${W - padR}" y1="${y(0)}" y2="${y(0)}" stroke="#c9cdd4"/></svg>`;
+  wrap.innerHTML = svg;
+  const sums = Object.fromEntries(SERIES.map(([k]) => [k, series.reduce((a, b) => a + (b[k] || 0), 0)]));
+  $("legend").innerHTML = SERIES.map(([k, c]) => `<span><i style="background:${c}"></i>${esc(k)} ${fmtNum(sums[k])}</span>`).join("");
+  const last = series.slice(-12).reduce((a, b, i) => a + totals[series.length - Math.min(12, series.length) + i], 0);
+  $("tpinfo").textContent = `${bs}s buckets · ${(last / (Math.min(12, series.length) * bs || 1)).toFixed(2)} tasks/s (last min)`;
+}
+
+// ---- filters & task table ----
+function renderFilters() {
+  const counts = (state.metrics && state.metrics.status_counts) || {};
+  const chip = (val, label, n) => `<span class="chip ${state.filter === val ? "on" : ""}" data-f="${esc(val)}">${esc(label)}` +
+                                  (n != null ? `<span class="n">${fmtNum(n)}</span>` : "") + `</span>`;
+  let h = chip("", "all", null) + STATUSES.filter(s => s !== "CREATED" || counts[s]).map(s => chip(s, s, counts[s])).join("");
+  h += `<span style="margin-left:auto"></span><select id="poolf"><option value="">all pools</option>` +
+       Object.keys(state.pools).map(p => `<option ${state.poolFilter === p ? "selected" : ""}>${esc(p)}</option>`).join("") + `</select>`;
+  $("filters").innerHTML = h;
+}
+$("filters").addEventListener("click", e => {
+  const c = e.target.closest("[data-f]"); if (!c) return;
+  state.filter = c.dataset.f; renderFilters(); renderTiles(); refreshTasks();
+});
+$("filters").addEventListener("change", e => { if (e.target.id === "poolf") { state.poolFilter = e.target.value; refreshTasks(); } });
+
+function timerCell(t) {
+  const n = now();
+  if ((t.status === "CLAIMED" || t.status === "RUNNING") && t.lease_expires_at != null) {
+    const d = t.lease_expires_at - n;
+    return d >= 0 ? `<span class="cd lease" title="lease expires (renewed by heartbeat)">lease ${d.toFixed(1)}s</span>`
+                  : `<span class="cd expired" title="lease expired: will be recovered on next claim">lease expired ${(-d).toFixed(1)}s</span>`;
+  }
+  if (t.status === "RETRY_WAIT" || (t.status === "PENDING" && t.run_after > n + 0.05)) {
+    const d = (t.run_after || 0) - n;
+    return d > 0 ? `<span class="cd retry">retry in ${d.toFixed(1)}s</span>` : `<span class="cd retry">ready</span>`;
+  }
+  if (TERMINAL.has(t.status) && t.finished_at && t.started_at) return `<span class="cd" style="color:var(--muted)">ran ${fmtSec(t.finished_at - t.started_at)}</span>`;
+  return "";
+}
+function renderTasks() {
+  const rows = state.tasks;
+  if (!rows.length) { $("rows").innerHTML = `<tr><td colspan="10" class="empty">no tasks${state.filter ? " with status " + esc(state.filter) : ""}</td></tr>`; }
+  else $("rows").innerHTML = rows.map(t => {
+    const p = Math.max(0, Math.min(1, t.progress || 0));
+    const canCancel = !TERMINAL.has(t.status) && !t.cancel_requested;
+    return `<tr data-id="${esc(t.id)}" class="${state.selected === t.id ? "sel" : ""}">
+      <td><a class="tid" data-open="${esc(t.id)}" title="${esc(t.id)}">${shortId(t.id)}</a></td>
+      <td class="nw">${esc(t.type)}</td><td class="hide-sm mono nw">${esc(t.pool)}</td>
+      <td><span class="badge b-${esc(t.status)}">${esc(t.status)}</span>${t.cancel_requested && !TERMINAL.has(t.status) ? ` <span class="note" title="cancel requested">⊘</span>` : ""}</td>
+      <td class="num mono">${esc(t.attempts)}/${esc(t.max_attempts)}</td>
+      <td><span class="bar"><i style="width:${(p * 100).toFixed(0)}%"></i></span> <span class="mono note">${(p * 100).toFixed(0)}%</span></td>
+      <td data-timer="${esc(t.id)}">${timerCell(t)}</td>
+      <td class="hide-sm mono note nw">${esc(t.worker_id ?? "")}</td>
+      <td class="hide-sm err" title="${esc(t.error ?? "")}">${esc(t.error ?? "")}</td>
+      <td>${canCancel ? `<button class="xs danger" data-cancel="${esc(t.id)}">cancel</button>` : ""}</td></tr>`;
+  }).join("");
+  $("taskinfo").textContent = `${rows.length} shown${rows.length >= 200 ? " (latest 200)" : ""}`;
+}
+function tickTimers() {
+  const byId = new Map(state.tasks.map(t => [t.id, t]));
+  for (const td of document.querySelectorAll("[data-timer]")) { const t = byId.get(td.dataset.timer); if (t) td.innerHTML = timerCell(t); }
+  if (state.detail) { const el = $("d-timer"); if (el) el.innerHTML = timerCell(state.detail) || "–"; }
+  $("clock").textContent = "server " + new Date(now() * 1000).toLocaleTimeString();
+}
+document.addEventListener("click", async e => {
+  const o = e.target.closest("[data-open]");
+  if (o) { e.preventDefault(); openDrawer(o.dataset.open); return; }
+  const c = e.target.closest("[data-cancel]");
+  if (c) {
+    c.disabled = true;
+    try { await post(`/api/tasks/${encodeURIComponent(c.dataset.cancel)}/cancel`); } catch (err) { alert("cancel failed: " + err.message); }
+    refreshTasks(); if (state.selected === c.dataset.cancel) loadDetail();
+  }
+});
+$("rows").addEventListener("click", e => {
+  if (e.target.closest("button,a")) return;
+  const tr = e.target.closest("tr[data-id]"); if (tr) openDrawer(tr.dataset.id);
+});
+
+// ---- pools & workers ----
+function renderPools() {
+  const byPool = {};
+  for (const p of Object.keys(state.pools)) byPool[p] = [];
+  for (const w of state.workers) (byPool[w.pool] ||= []).push(w);
+  const qd = (state.metrics && state.metrics.queue_depth) || {};
+  const html = Object.entries(byPool).map(([pool, ws]) => {
+    const size = state.pendingPool[pool] ?? state.pools[pool] ?? 0;
+    const q = qd[pool];
+    const qs = q ? `ready ${q.ready ?? 0} · delayed ${q.delayed ?? 0} · running ${q.running ?? 0}` : "";
+    const rows = ws.map(w => {
+      const st = w.state || w.status;
+      const exited = st === "stopped" || st === "dead";
+      const hb = w.heartbeat_age == null ? "–" : fmtSec(Math.max(0, w.heartbeat_age));
+      return `<tr class="wk"><td class="mono" title="pid ${esc(w.pid ?? "")}">${esc(w.id)}</td>
+        <td><span class="badge w-${esc(st)}">${esc(st)}</span></td>
+        <td class="num mono" title="heartbeat age">${esc(hb)}</td>
+        <td>${w.current_task_id ? `<a class="tid" data-open="${esc(w.current_task_id)}">${shortId(w.current_task_id)}</a>` : `<span class="note">–</span>`}</td>
+        <td class="num mono note" title="succeeded / failed">${esc(w.tasks_succeeded ?? 0)}/${esc(w.tasks_failed ?? 0)}</td>
+        <td class="acts">${exited ? `<span class="note">${esc(w.exit_code != null ? "exit " + w.exit_code : "")}</span>` :
+          `<button class="xs danger" data-wact="kill" data-w="${esc(w.id)}" title="SIGKILL the process">Kill</button>
+           ${w.paused ? `<button class="xs" data-wact="resume" data-w="${esc(w.id)}" title="SIGCONT">Resume</button>`
+                      : `<button class="xs" data-wact="pause" data-w="${esc(w.id)}" title="SIGSTOP (heartbeats stop: lease will expire)">Pause</button>`}
+           <button class="xs" data-wact="drain" data-w="${esc(w.id)}" ${w.draining ? "disabled" : ""} title="SIGTERM: finish or release, then exit">Drain</button>`}</td></tr>`;
+    }).join("");
+    return `<div class="pool"><div class="poolhead"><b>${esc(pool)}</b><span class="q">${esc(qs)}</span>
+      <span class="stepper"><button class="xs" data-pool="${esc(pool)}" data-d="-1" ${size <= 0 ? "disabled" : ""}>−</button>
+      <span class="n" title="desired size">${esc(size)}</span>
+      <button class="xs" data-pool="${esc(pool)}" data-d="1" ${size >= 16 ? "disabled" : ""}>+</button></span></div>
+      ${rows ? `<div class="scroll"><table><thead><tr><th>worker</th><th>state</th><th class="num">hb</th><th>task</th><th class="num">ok/fail</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+             : `<div class="empty">no workers</div>`}</div>`;
+  }).join("");
+  $("pools").innerHTML = html || `<div class="empty">no pools</div>`;
+  const live = state.workers.filter(w => !["stopped", "dead"].includes(w.state || w.status)).length;
+  $("wkinfo").textContent = `${live} live process${live === 1 ? "" : "es"}`;
+}
+$("pools").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.pool) {
+    const p = b.dataset.pool, size = Math.max(0, Math.min(16, (state.pendingPool[p] ?? state.pools[p] ?? 0) + Number(b.dataset.d)));
+    state.pendingPool[p] = size; renderPools();
+    try { state.pools = await post(`/api/pools/${encodeURIComponent(p)}`, {size}, "PUT"); }
+    catch (err) { alert("resize failed: " + err.message); }
+    delete state.pendingPool[p]; renderPools(); return;
+  }
+  if (b.dataset.wact) {
+    if (b.dataset.wact === "kill" && !e.shiftKey && !confirm(`kill -9 worker ${b.dataset.w}?\n(shift-click to skip this prompt)`)) return;
+    b.disabled = true;
+    try { await post(`/api/workers/${encodeURIComponent(b.dataset.w)}/${b.dataset.wact}`); }
+    catch (err) { alert(`${b.dataset.wact} failed: ${err.message}`); }
+    refreshWorkers();
+  }
+});
+
+// ---- effects ledger ----
+function renderEffects() {
+  const rows = state.effects;
+  $("effects").innerHTML = rows.length ? rows.map(r => `<tr class="${r.duplicate_calls > 0 ? "dup" : ""}">
+      <td class="mono">${esc(r.idempotency_key)}</td><td>${esc(r.kind)}</td>
+      <td class="mono note hide-sm" style="overflow-wrap:anywhere">${esc(typeof r.detail === "string" ? r.detail : JSON.stringify(r.detail))}</td>
+      <td class="num mono ${r.duplicate_calls > 0 ? "dupn" : ""}" title="${r.duplicate_calls > 0 ? "provider received a repeat call with this key and did NOT charge again" : ""}">${esc(r.duplicate_calls)}</td>
+      <td class="num mono note hide-sm">${esc(ago(r.created_at))}</td></tr>`).join("")
+    : `<tr><td colspan="5" class="empty">no external effects yet (try charge_and_email or the no_double_charge demo)</td></tr>`;
+}
+
+// ---- demos ----
+function renderDemos() {
+  const box = $("demos");
+  if (!state.demosAvail) { box.innerHTML = `<div class="note">demo scenarios unavailable (/api/demos not found)</div>`; $("runs").innerHTML = ""; return; }
+  if (!state.demos) return;
+  const running = new Set(state.runs.filter(r => r.status === "running").map(r => r.name));
+  box.innerHTML = state.demos.map(d => `<button class="demo ${running.has(d.name) ? "running" : ""}" data-demo="${esc(d.name)}" title="${esc(d.description)}">
+      <b>${esc(d.title || d.name)}${running.has(d.name) ? " ⟳" : ""}</b><span>${esc(d.description)}</span></button>`).join("")
+    || `<div class="note">no demos</div>`;
+  renderRuns();
+}
+function renderRuns() {
+  const watch = Object.fromEntries((state.demos || []).map(d => [d.name, d.watch]));
+  const titles = Object.fromEntries((state.demos || []).map(d => [d.name, d.title || d.name]));
+  $("runs").innerHTML = state.runs.map((r, i) => {
+    const open = state.openRuns.has(r.run_id) || (i === 0 && !state.openRuns.has("closed:" + r.run_id));
+    const t0 = r.started_at;
+    const ids = (r.task_ids || []);
+    return `<div class="run"><div class="rh" data-run="${esc(r.run_id)}" data-open-state="${open ? 1 : 0}">
+        <span class="badge rs-${esc(r.status)}">${esc(r.status)}</span><b>${esc(titles[r.name] || r.name)}</b>
+        <span class="note">${ids.length} task${ids.length === 1 ? "" : "s"}</span>
+        <span class="t">${esc(ago(r.started_at))}${r.finished_at && t0 ? " · took " + esc(fmtSec(r.finished_at - t0)) : ""}</span></div>
+      ${open ? `${watch[r.name] ? `<div class="watch"><b>Watch:</b> ${esc(watch[r.name])}</div>` : ""}
+        <ol>${(r.log || []).map(l => `<li><span class="ts">${t0 && l.t != null ? "+" + esc((l.t - t0).toFixed(1)) + "s" : ""}</span><span class="m">${linkify(l.msg, ids)}</span></li>`).join("")
+             || `<li><span class="m note">starting…</span></li>`}</ol>
+        ${ids.length ? `<div style="padding:2px 8px 6px;display:flex;flex-wrap:wrap;gap:6px">${ids.slice(0, 40).map(id => `<a class="tid" data-open="${esc(id)}">${shortId(id)}</a>`).join("")}${ids.length > 40 ? `<span class="note">+${ids.length - 40}</span>` : ""}</div>` : ""}` : ""}
+    </div>`;
+  }).join("");
+}
+// escape the message, then turn any known task id (full or 8-char prefix) into a drawer link
+function linkify(msg, ids) {
+  let s = esc(msg);
+  const sorted = [...new Set(ids.map(String))].sort((a, b) => b.length - a.length);
+  if (!sorted.length) return s;
+  const byPrefix = new Map();
+  for (const id of sorted) { byPrefix.set(esc(id), id); if (id.length > 8) byPrefix.set(esc(id.slice(0, 8)), id); }
+  const re = new RegExp([...byPrefix.keys()].sort((a, b) => b.length - a.length).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+  return s.replace(re, m => `<a class="tid" data-open="${esc(byPrefix.get(m))}">${m}</a>`);
+}
+$("demos").addEventListener("click", async e => {
+  const b = e.target.closest("[data-demo]"); if (!b) return;
+  b.disabled = true;
+  try { const run = await post(`/api/demos/${encodeURIComponent(b.dataset.demo)}`); if (run && run.run_id) { state.runs.unshift(run); } }
+  catch (err) { alert("demo failed to start: " + err.message); }
+  b.disabled = false; renderDemos(); refreshRuns();
+});
+$("runs").addEventListener("click", e => {
+  if (e.target.closest("[data-open]")) return;
+  const h = e.target.closest("[data-run]"); if (!h) return;
+  const id = h.dataset.run;
+  if (h.dataset.openState === "1") { state.openRuns.delete(id); state.openRuns.add("closed:" + id); }
+  else { state.openRuns.add(id); state.openRuns.delete("closed:" + id); }
+  renderRuns();
+});
+
+// ---- drawer ----
+function openDrawer(id) {
+  state.selected = id; state.detail = null;
+  document.body.classList.add("drawer-open"); $("drawer").setAttribute("aria-hidden", "false");
+  $("d-head").innerHTML = `<span class="id">${esc(id)}</span><button class="x" id="d-close">Close ✕</button>`;
+  $("d-body").innerHTML = `<div class="note">loading…</div>`;
+  renderTasks(); loadDetail();
+}
+function closeDrawer() { state.selected = null; state.detail = null; document.body.classList.remove("drawer-open");
+  $("drawer").setAttribute("aria-hidden", "true"); renderTasks(); }
+$("shade").onclick = closeDrawer;
+document.addEventListener("keydown", e => { if (e.key === "Escape" && state.selected) closeDrawer(); });
+$("drawer").addEventListener("click", e => { if (e.target.id === "d-close") closeDrawer(); });
+let detailSeq = 0;
+async function loadDetail() {
+  const id = state.selected; if (!id) return;
+  const seq = ++detailSeq;
+  let t;
+  try { t = await api(`/api/tasks/${encodeURIComponent(id)}`); }
+  catch (err) { if (seq === detailSeq && state.selected === id) $("d-body").innerHTML = `<div class="msg bad">${esc(err.message)}</div>`; return; }
+  if (seq !== detailSeq || state.selected !== id) return;
+  const prevScroll = $("d-body").scrollTop;
+  state.detail = t; renderDrawer(t); $("d-body").scrollTop = prevScroll;
+}
+const json = v => esc(typeof v === "string" ? v : JSON.stringify(v, null, 2));
+const ts = v => v == null ? "–" : `${new Date(v * 1000).toLocaleTimeString()} (${ago(v)})`;
+function renderDrawer(t) {
+  const canCancel = !TERMINAL.has(t.status) && !t.cancel_requested;
+  $("d-head").innerHTML = `<span class="badge b-${esc(t.status)}">${esc(t.status)}</span><span class="id">${esc(t.id)}</span>
+    <span class="note">${esc(t.type)} @ ${esc(t.pool)}</span>
+    ${canCancel ? `<button class="xs danger" data-cancel="${esc(t.id)}">cancel</button>` : ""}
+    <button class="x" id="d-close">Close ✕</button>`;
+  const ev = t.events || [];
+  const t0 = t.created_at;
+  const tl = ev.map(e => {
+    const kind = e.kind || "transition";
+    const tr = kind === "transition" || (e.from_status && e.to_status && e.from_status !== e.to_status)
+      ? `<div class="tr">${e.from_status ? `<span class="badge b-${esc(e.from_status)}">${esc(e.from_status)}</span> →` : ""}
+           ${e.to_status ? `<span class="badge b-${esc(e.to_status)}">${esc(e.to_status)}</span>` : ""}</div>` : "";
+    return `<li class="k-${esc(kind)}">
+      <div class="meta"><span>+${esc(t0 != null ? (e.ts - t0).toFixed(2) : "?")}s</span>
+        <span class="kindtag">${esc(kind)}</span>
+        ${e.attempt != null ? `<span>attempt ${esc(e.attempt)}</span>` : ""}
+        ${e.fence != null ? `<span>fence ${esc(e.fence)}</span>` : ""}
+        ${e.worker_id ? `<span>${esc(e.worker_id)}</span>` : ""}</div>
+      ${tr}${e.message ? `<div class="m">${esc(e.message)}</div>` : ""}</li>`;
+  }).join("");
+  const kv = [["attempts", `${t.attempts} / ${t.max_attempts}`], ["fence", t.fence], ["worker", t.worker_id ?? "–"],
+    ["progress", `${Math.round((t.progress || 0) * 100)}%`], ["timer", `<span id="d-timer">${timerCell(t) || "–"}</span>`],
+    ["priority", t.priority], ["timeout_s", t.timeout_s], ["cancel requested", t.cancel_requested ? "yes" : "no"],
+    ["idempotency key", t.idempotency_key ?? "–"], ["created", ts(t.created_at)], ["started", ts(t.started_at)],
+    ["finished", ts(t.finished_at)], ["run_after", ts(t.run_after || null)], ["lease expires", ts(t.lease_expires_at)]];
+  $("d-body").innerHTML = `<dl class="kv">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${k === "timer" ? v : esc(v)}</dd>`).join("")}</dl>
+    ${t.error ? `<h3>Error</h3><pre class="json bad">${json(t.error)}</pre>` : ""}
+    ${t.result != null ? `<h3>Result</h3><pre class="json">${json(t.result)}</pre>` : ""}
+    <h3>Payload</h3><pre class="json">${json(t.payload ?? {})}</pre>
+    ${t.checkpoint != null ? `<h3>Checkpoint</h3><pre class="json">${json(t.checkpoint)}</pre>` : ""}
+    <h3>Event timeline (${ev.length})</h3><ul class="tl">${tl || `<li class="k-info"><span class="note">no events</span></li>`}</ul>`;
+}
+
+// ---- submit form ----
+function fillTypes() {
+  const sel = $("f-type");
+  sel.innerHTML = Object.keys(state.types).map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join("");
+  sel.onchange = () => {
+    const spec = state.types[sel.value] || {};
+    $("f-payload").value = JSON.stringify(spec.example || {}, null, 1);
+    $("f-desc").textContent = spec.description || "";
+    if (spec.pool && state.pools[spec.pool] !== undefined) $("f-pool").value = spec.pool;
+  };
+  fillPoolSelect(); sel.onchange();
+}
+function fillPoolSelect() {
+  const sel = $("f-pool"), cur = sel.value;
+  sel.innerHTML = `<option value="">(type default)</option>` + Object.keys(state.pools).map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+}
+$("submit").addEventListener("submit", async e => {
+  e.preventDefault();
+  const msg = $("f-msg"); msg.className = "msg"; msg.textContent = "";
+  let payload;
+  try { payload = JSON.parse($("f-payload").value || "{}"); } catch (err) { msg.className = "msg bad"; msg.textContent = "payload is not valid JSON"; return; }
+  const body = {type: $("f-type").value, payload, priority: Number($("f-priority").value) || 0,
+                max_attempts: Number($("f-attempts").value) || 3, timeout_s: Number($("f-timeout").value) || 60};
+  if ($("f-pool").value) body.pool = $("f-pool").value;
+  const key = $("f-key").value.trim(); if (key) body.idempotency_key = key;
+  const count = Math.max(1, Math.min(100, Number($("f-count").value) || 1));
+  const results = [];
+  try {
+    for (let i = 0; i < count; i++) {
+      const b = {...body}; if (key && count > 1) b.idempotency_key = `${key}-${i}`;
+      results.push(await post("/api/tasks", b));
+    }
+  } catch (err) { msg.className = "msg bad"; msg.textContent = (err.status === 409 ? "409 idempotency conflict: " : "error: ") + err.message; }
+  if (results.length) {
+    const dd = results.filter(r => r.deduplicated).length;
+    if (!msg.textContent) { msg.className = "msg ok";
+      msg.innerHTML = count === 1 ? `${dd ? "deduplicated → existing task " : "submitted "}<a class="tid" data-open="${esc(results[0].id)}">${shortId(results[0].id)}</a>`
+                                  : `submitted ${results.length}${dd ? ` (${dd} deduplicated)` : ""}`; }
+  }
+  refreshTasks();
+});
+
+// ---- polling ----
+function setConn(ok, text) { const c = $("conn"); c.className = "conn " + (ok ? "ok" : "err"); c.lastElementChild.textContent = text; }
+async function refreshMetrics() {
+  if (!state.metricsAvail) return;
+  try { const m = await api("/api/metrics"); state.metrics = m; syncClock(m.now); }
+  catch (err) { if (err.status === 404) { state.metricsAvail = false; state.metrics = null; } }
+  renderTiles(); renderChart();
+}
+async function refreshTasks() {
+  const q = new URLSearchParams({limit: "200"}); if (state.filter) q.set("status", state.filter); if (state.poolFilter) q.set("pool", state.poolFilter);
+  const want = q.toString();
+  const rows = await api("/api/tasks?" + want);
+  const cur = new URLSearchParams({limit: "200"}); if (state.filter) cur.set("status", state.filter); if (state.poolFilter) cur.set("pool", state.poolFilter);
+  if (cur.toString() !== want) return;   // filter changed while in flight
+  state.tasks = rows; renderTasks();
+  if (!state.metrics) renderTiles();
+}
+async function refreshWorkers() {
+  const [ws, pools] = await Promise.all([api("/api/workers"), api("/api/pools")]);
+  state.workers = ws;
+  const poolsChanged = JSON.stringify(Object.keys(pools)) !== JSON.stringify(Object.keys(state.pools));
+  state.pools = pools; if (poolsChanged) { fillPoolSelect(); renderFilters(); }
+  renderPools();
+}
+async function refreshEffects() { state.effects = await api("/api/effects"); renderEffects(); }
+async function refreshRuns() {
+  if (!state.demosAvail) return;
+  try { state.runs = await api("/api/demos/runs"); } catch (err) { if (err.status === 404) { state.demosAvail = false; } }
+  renderDemos();
+}
+async function loadDemos() {
+  try { state.demos = await api("/api/demos"); state.demosAvail = true; }
+  catch (err) { if (err.status === 404) state.demosAvail = false; state.demos = state.demos || []; }
+  renderDemos();
+}
+let busy = false, ticks = 0;
+async function poll() {
+  if (busy) return; busy = true;
+  const jobs = [refreshMetrics(), refreshTasks(), refreshWorkers()];
+  if (ticks % 2 === 0) jobs.push(refreshEffects(), refreshRuns());
+  if (state.selected) jobs.push(loadDetail());
+  if (ticks % 15 === 0 && !state.metricsAvail) state.metricsAvail = true;      // re-probe endpoints built later
+  if (ticks % 15 === 7 && (!state.demosAvail || !state.demos || !state.demos.length)) jobs.push(loadDemos());
+  const res = await Promise.allSettled(jobs);
+  const failed = res.filter(r => r.status === "rejected");
+  setConn(failed.length === 0, failed.length ? "API error: " + (failed[0].reason && failed[0].reason.message || "?") : "live");
+  if (failed.length) console.warn("poll errors", failed.map(f => f.reason));
+  ticks++; busy = false;
+}
+async function init() {
+  try { state.pools = await api("/api/pools"); } catch { }
+  try { state.types = await api("/api/task-types"); fillTypes(); } catch (err) { $("f-msg").textContent = "could not load task types"; }
+  renderFilters(); renderTiles(); renderChart();
+  loadDemos();
+  await poll();
+  setInterval(poll, 1000);
+  setInterval(tickTimers, 100);
+  window.addEventListener("resize", () => renderChart());
+}
+init();
 </script>
 </body>
 </html>

@@ -309,6 +309,9 @@ class TaskStore:
     def release(self, task_id, fence, worker_id, reason: str) -> None:
         """Graceful hand-back (worker draining): back to PENDING, and the attempt doesn't count."""
         def go(c, task):
+            if task["cancel_requested"]:
+                self._transition(c, task, Status.CANCELLED, f"cancelled (released by {worker_id} while cancel requested)")
+                return
             self._transition(c, task, Status.PENDING, f"released by {worker_id}: {reason}",
                              attempts=task["attempts"] - 1, run_after=self.clock(), worker_id=None)
         self._fenced(task_id, fence, worker_id, "release", go)
@@ -339,16 +342,18 @@ class TaskStore:
                  crash *between* the provider call and our ledger write.
         """
         key = f"{task_id}:{step}"
-        row = self.conn().execute("SELECT result FROM effects WHERE key=?", (key,)).fetchone()
-        if row is not None:
-            with self.tx() as c:
-                self._incr(c, "effects_skipped_already_done")
-                t = self._load(c, task_id)
-                self._event(c, task_id, t["status"], t["status"], t["attempts"], worker_id,
-                            f"effect '{step}' already done on an earlier attempt: skipped", fence=fence, kind="info")
+
+        def check_ledger(c, task):  # fenced: a zombie neither starts effects nor reads the ledger
+            row = c.execute("SELECT result FROM effects WHERE key=?", (key,)).fetchone()
+            if row is None:
+                return None
+            self._incr(c, "effects_skipped_already_done")
+            self._event(c, task_id, task["status"], task["status"], task["attempts"], worker_id,
+                        f"effect '{step}' already done on an earlier attempt: skipped", fence=fence, kind="info")
             return json.loads(row["result"])
-        # Don't start side effects as a zombie.
-        self._fenced(task_id, fence, worker_id, f"effect '{step}'", lambda c, t: None)
+        done = self._fenced(task_id, fence, worker_id, f"effect '{step}'", check_ledger)
+        if done is not None:
+            return done
         result = self.provider_call(key, kind, detail)
         if crash_before_record:
             crash_before_record()
