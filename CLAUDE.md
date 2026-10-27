@@ -58,16 +58,16 @@ CREATED ─► PENDING ─► CLAIMED ─► RUNNING ─► SUCCEEDED
    (finish the task or release the lease)
 
 ### Phase 3: metrics, console, demos
-- [ ] Metrics: counts by status, queue depth per pool, counters (retries, lease
+- [x] Metrics: counts by status, queue depth per pool, counters (retries, lease
   recoveries, fenced rejections, dedup hits, worker restarts), wait/run p50/p95,
   throughput time series; `/metrics` in Prometheus text format
-- [ ] Console: metric tiles + throughput chart, pools/workers panel (scale +/-,
+- [x] Console: metric tiles + throughput chart, pools/workers panel (scale +/-,
   Kill, Pause/Resume, Drain), submit form, task table with live lease/retry
   countdowns, detail drawer with event timeline, side-effects ledger
-- [ ] One-click demo scenarios: happy path, retry+backoff, crash -> lease recovery,
+- [x] One-click demo scenarios: happy path, retry+backoff, crash -> lease recovery,
   poison pill -> DEAD, hang -> timeout, zombie worker -> fencing, idempotent
   submit, charge+crash -> no double charge, cancel running, multi-pool burst
-- [ ] Fault-injection tests (fake clock), README with demo walkthrough
+- [x] Fault-injection tests (fake clock), README with demo walkthrough
 
 ### Out of scope
 Authentication, distributed brokers (Redis/RabbitMQ), task DAGs, cron scheduling,

@@ -25,7 +25,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import handlers
+from . import demos, handlers, metrics
+from .errors import ApiError
 from .states import IllegalTransition, Status
 from .store import IdempotencyConflict, TaskFinished, TaskNotFound, TaskStore
 from .supervisor import Supervisor
@@ -53,12 +54,6 @@ class WorkerAction(StrEnum):
     PAUSE = "pause"
     RESUME = "resume"
     DRAIN = "drain"
-
-
-class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str, details=None):
-        super().__init__(message)
-        self.status, self.code, self.message, self.details = status, code, message, details
 
 
 # Most specific first: TaskFinished is an IllegalTransition.
@@ -225,6 +220,9 @@ def create_app(db_path: str = "tasks.db", start_workers: bool = True, pools: dic
     @app.get("/api/effects")
     def effects():
         return store.external_effects()
+
+    metrics.register(app, store, sup, heartbeat_s=heartbeat_s)
+    demos.register(app, store, sup)
 
     @app.get("/")
     def index():

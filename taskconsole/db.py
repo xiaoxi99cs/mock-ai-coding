@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(pool, status, run_after);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_finished ON tasks(finished_at);
 -- Lease recovery runs on every claim. A lease is set only while CLAIMED/RUNNING, so this
 -- partial index holds just the in-flight tasks and the scan stays O(in-flight), not O(history).
 CREATE INDEX IF NOT EXISTS idx_tasks_lease ON tasks(lease_expires_at) WHERE lease_expires_at IS NOT NULL;
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS task_events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_task ON task_events(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON task_events(kind, id);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON task_events(ts);
 
 CREATE TABLE IF NOT EXISTS workers (
     id              TEXT PRIMARY KEY,
