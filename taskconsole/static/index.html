@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Async Task Console</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 16px; background: #fafafa; color: #222; }
+  table { border-collapse: collapse; width: 100%; background: #fff; }
+  th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  textarea { width: 260px; height: 32px; }
+  pre { background: #fff; padding: 8px; max-height: 300px; overflow: auto; }
+</style>
+</head>
+<body>
+<h1>Async Task Console</h1>
+<form id="submit">
+  <select name="type" id="type"></select>
+  <textarea name="payload" id="payload">{}</textarea>
+  <input name="max_attempts" type="number" value="3" min="1" style="width:60px">
+  <button>Submit</button>
+</form>
+<table><thead><tr><th>id</th><th>type</th><th>pool</th><th>status</th><th>attempts</th><th>progress</th><th>error</th><th></th></tr></thead>
+<tbody id="rows"></tbody></table>
+<pre id="detail"></pre>
+<script>
+const api = (p, o) => fetch(p, o).then(r => r.json());
+let types = {};
+api('/api/task-types').then(t => {
+  types = t;
+  type.innerHTML = Object.keys(t).map(k => `<option>${k}</option>`).join('');
+  type.onchange = () => payload.value = JSON.stringify(types[type.value].example);
+  type.onchange();
+});
+submit.onsubmit = async e => {
+  e.preventDefault();
+  await api('/api/tasks', {method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({type: type.value, payload: JSON.parse(payload.value), max_attempts: +submit.max_attempts.value})});
+  refresh();
+};
+async function refresh() {
+  const tasks = await api('/api/tasks');
+  rows.innerHTML = tasks.map(t => `<tr><td><a href="#" onclick="show('${t.id}')">${t.id}</a></td><td>${t.type}</td><td>${t.pool}</td>
+    <td>${t.status}</td><td>${t.attempts}/${t.max_attempts}</td><td>${Math.round(t.progress * 100)}%</td><td>${t.error ?? ''}</td>
+    <td><button onclick="cancelTask('${t.id}')">cancel</button></td></tr>`).join('');
+}
+async function show(id) { detail.textContent = JSON.stringify(await api(`/api/tasks/${id}`), null, 2); }
+async function cancelTask(id) { await api(`/api/tasks/${id}/cancel`, {method: 'POST'}); refresh(); }
+refresh(); setInterval(refresh, 1000);
+</script>
+</body>
+</html>
