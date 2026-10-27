@@ -24,7 +24,12 @@
 <tbody id="rows"></tbody></table>
 <pre id="detail"></pre>
 <script>
-const api = (p, o) => fetch(p, o).then(r => r.json());
+// Errors share one shape: {"error": {"code", "message"}}.
+const api = async (p, o) => {
+  const r = await fetch(p, o), body = await r.json();
+  if (!r.ok) { alert(`${body.error.code}: ${body.error.message}`); throw new Error(body.error.code); }
+  return body;
+};
 let types = {};
 api('/api/task-types').then(t => {
   types = t;
@@ -39,7 +44,7 @@ submit.onsubmit = async e => {
   refresh();
 };
 async function refresh() {
-  const tasks = await api('/api/tasks');
+  const tasks = (await api('/api/tasks')).items;
   rows.innerHTML = tasks.map(t => `<tr><td><a href="#" onclick="show('${t.id}')">${t.id}</a></td><td>${t.type}</td><td>${t.pool}</td>
     <td>${t.status}</td><td>${t.attempts}/${t.max_attempts}</td><td>${Math.round(t.progress * 100)}%</td><td>${t.error ?? ''}</td>
     <td><button onclick="cancelTask('${t.id}')">cancel</button></td></tr>`).join('');

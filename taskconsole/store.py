@@ -37,6 +37,10 @@ class IdempotencyConflict(Exception):
     """Same idempotency key re-used with a different request body."""
 
 
+class TaskFinished(IllegalTransition):
+    """The task already reached a terminal state other than the one requested."""
+
+
 JSON_FIELDS = ("payload", "checkpoint", "result")
 
 
@@ -186,7 +190,9 @@ class TaskStore:
     def get(self, task_id) -> dict:
         return _row_to_task(self._load(self.conn(), task_id))
 
-    def list_tasks(self, status=None, pool=None, limit=100, offset=0) -> list[dict]:
+    def list_tasks(self, status=None, pool=None, limit=100, after=None) -> list[dict]:
+        """Newest first. Keyset pagination: `after` is the (created_at, id) of the last task of the
+        previous page, so rows inserted meanwhile never shift a page (no skips, no repeats)."""
         sql, args = "SELECT * FROM tasks WHERE 1=1", []
         if status:
             sql += " AND status=?"
@@ -194,8 +200,11 @@ class TaskStore:
         if pool:
             sql += " AND pool=?"
             args.append(pool)
-        sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-        args += [limit, offset]
+        if after:
+            sql += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+            args += [after[0], after[0], after[1]]
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        args.append(limit)
         return [_row_to_task(r) for r in self.conn().execute(sql, args)]
 
     def events(self, task_id) -> list[dict]:
@@ -203,11 +212,14 @@ class TaskStore:
         return [dict(r) for r in rows]
 
     def cancel(self, task_id) -> dict:
+        """Idempotent: cancelling a CANCELLED task, or re-requesting a pending cancel, is a no-op."""
         with self.tx() as c:
             task = self._load(c, task_id)
             status = Status(task["status"])
+            if status == Status.CANCELLED or (status in ACTIVE and task["cancel_requested"]):
+                return _row_to_task(task)
             if status in TERMINAL:
-                raise IllegalTransition(f"task already {status}")
+                raise TaskFinished(f"task {task_id} already {status}")
             if status in ACTIVE:
                 # Running code can't be stopped from outside: flag it, the worker sees it on its next heartbeat.
                 c.execute("UPDATE tasks SET cancel_requested=1, updated_at=? WHERE id=?", (self.clock(), task_id))
