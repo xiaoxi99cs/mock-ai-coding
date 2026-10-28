@@ -105,6 +105,93 @@ draining worker, and it does not count as an attempt.
 | `hang` | ignores its context and never returns (exercises the hard timeout) |
 | `charge_and_email` | charges a card, then emails a receipt, both as idempotent side effects. `crash`: `after_charge` or `before_record` |
 
+Each type declares a pydantic payload model (`GET /api/task-types` publishes its JSON
+Schema). Unknown fields are rejected, so a typo fails instead of silently using a default.
+The API checks the payload at submit time and returns **422** without enqueuing anything.
+The worker checks it again before running, and a payload that fails there (for example,
+one that bypassed the API) is a non-retryable FAILED on attempt 1. Retrying bad input
+only burns attempts.
+
+## Design decisions and trade-offs
+
+Each choice below names what it buys, what it costs, and what I would change at a larger
+scale.
+
+**SQLite is both the queue and the source of truth.** The task row, its audit event and
+the counters commit in one transaction. There is no broker to keep in sync with a
+database, so there is no dual-write problem, and WAL gives crash consistency for free.
+*Cost:* one writer at a time. Every claim, heartbeat, progress update and completion
+queues for the same write lock, so throughput is bounded by the commit rate, and
+everything runs on one host. *At scale:* Postgres, claiming with
+`SELECT … FOR UPDATE SKIP LOCKED` and waking workers with `LISTEN/NOTIFY`. The
+`TaskStore` interface would not change.
+
+**At-least-once execution, effectively-once side effects.** A worker that stalls past its
+lease (SIGSTOP, a long GC pause, a slow lock wait) loses its task while still running it,
+so a handler can run twice. Preventing that would need coordination with whatever the
+handler talks to, so the system makes the second run harmless instead:
+- fencing turns the stale run's database writes into rejected no-ops;
+- side effects go through the `task_id:step` ledger and the provider's idempotency key.
+
+*Cost:* a handler must route external effects through `ctx.effect()`. An effect it
+performs directly is not protected.
+
+**The lease length trades recovery time against false alarms.** With a 5 s lease and a
+1 s heartbeat, a crashed worker's task is recovered within about 5 s (plus backoff).
+*Cost:* a healthy worker stalled for more than 5 s loses its task and the work is redone.
+The connection's 30 s `busy_timeout` is longer than the lease, so under heavy write
+contention a heartbeat stuck waiting for the lock can cause this. The supervisor learns
+of a process death immediately but still waits for the lease to expire, which keeps a
+single, well-tested recovery path. *Next step:* recover a known-dead worker's tasks at
+once (still fenced), and keep the heartbeat's lock wait well under the lease.
+
+**Recovery runs in the claim path, not in a separate reaper.** An expired task is
+recovered in the same transaction that could claim it, so there is no window where it is
+neither recovered nor claimable, and no extra process can die. The supervisor tick also
+runs recovery so the console shows it while the queue is idle. *Cost:* every claim scans
+the in-flight tasks while holding the write lock. A partial index on `lease_expires_at`
+keeps that scan O(in-flight), not O(history), and a test checks the query plan.
+
+**Crashes count as attempts.** A poison pill that kills every worker ends up DEAD instead
+of looping forever. *Cost:* a task whose worker an operator kills also loses an attempt.
+A graceful drain hands the task back without consuming one, so only ungraceful deaths
+count.
+
+**A worker is a process; its handler runs in a thread.** A separate process can really be
+`kill -9`'d, and exiting the process is the only reliable way to stop stuck Python code
+(threads cannot be killed). The handler runs in a thread so that the main thread keeps
+heartbeating even while the handler is busy; the GIL is released between bytecodes often
+enough for that. *Cost:* one task at a time per process, so concurrency equals the number
+of processes, each with its own interpreter's memory.
+
+**Cancellation and timeouts are cooperative, with a hard backstop.** A handler notices
+them at `ctx.sleep()` / `ctx.progress()`. If it ignores them, the worker records the
+failure at `timeout_s + 1 s` and exits, and the supervisor replaces it. *Cost:* a cancel
+takes effect after up to one heartbeat plus the time to the handler's next check.
+
+**Two clocks, on purpose.** Everything persisted or compared across processes (leases,
+`run_after`, timestamps) uses the store's clock: wall time, injectable, so the fault tests
+drive it with a fake clock. *Cost:* if NTP steps the system clock, every lease shifts with
+it. A handler's timeout is measured inside one process with `time.monotonic()`, which is
+immune to clock steps but is not driven by the fake clock; those tests use short real
+durations instead.
+
+**One API process.** The supervisor lives in the FastAPI lifespan, so running
+`uvicorn --workers N` would start N supervisors and N times the workers. Worker ids come
+from a persisted counter, so a restarted app never reuses an id, and at startup any
+worker rows still marked alive from the previous run are marked dead (their processes
+exit on their own once their parent is gone).
+
+**Known limits, deliberately out of scope:**
+- **Strict priority with no aging:** a steady stream of high-priority tasks starves
+  low-priority ones.
+- **Polling:** idle workers poll every 0.5 s, so pickup latency is up to 0.5 s.
+- **No retention:** `tasks`, `task_events` and `effects` grow forever. The fix is a TTL
+  purge of terminal tasks that keeps idempotency keys for their window.
+- **Idempotency keys:** they are a body field rather than the conventional
+  `Idempotency-Key` header, and they never expire.
+- **No re-drive:** there is no endpoint to re-queue a DEAD or FAILED task.
+
 ## API reference
 
 All timestamps are store-clock epoch seconds.
@@ -116,7 +203,8 @@ Every error has one shape, so clients branch on `code`, never on the message tex
 ```
 
 Codes: `validation_error` (422, with field-level `details`), `unknown_task_type` and
-`unknown_pool` (422, with the valid values in `details`), `invalid_cursor` (400),
+`unknown_pool` (422, with the valid values in `details`), `invalid_payload` (422, with
+field-level `details`), `invalid_cursor` (400),
 `task_not_found`, `worker_not_found`, `pool_not_found`, `demo_not_found`, `not_found` (404),
 `method_not_allowed` (405), `idempotency_conflict`, `task_already_finished` (409).
 
@@ -124,8 +212,8 @@ Codes: `validation_error` (422, with field-level `details`), `unknown_task_type`
 
 | method & path | description |
 |---|---|
-| `GET /api/task-types` | `{type: {description, example, pool}}` |
-| `POST /api/tasks` | body `{type, payload?, pool?, priority?, max_attempts? (1-20), timeout_s?, idempotency_key?}`. Returns **201** with the task, **200** with `deduplicated: true` for a repeated key, **409** `idempotency_conflict` for a key re-used with a different body, **422** for an unknown type or pool |
+| `GET /api/task-types` | `{type: {description, example, pool, payload_schema}}` (`payload_schema` is JSON Schema) |
+| `POST /api/tasks` | body `{type, payload?, pool?, priority?, max_attempts? (1-20), timeout_s?, idempotency_key?}`. Returns **201** with the task, **200** with `deduplicated: true` for a repeated key, **409** `idempotency_conflict` for a key re-used with a different body, **422** for an unknown type or pool, or a payload that fails the type's schema |
 | `GET /api/tasks?status=&pool=&limit=&cursor=` | newest first; returns `{items, next_cursor}`. Pass `next_cursor` back as `cursor` for the next page (null on the last page). Keyset pagination on `(created_at, id)`, so tasks inserted while paging never shift a page. An unknown `status` or `pool` is a **422**, not an empty list; `limit` is 1-500 |
 | `GET /api/tasks/{id}` | the task plus `events` (its full timeline; `kind` is `transition`, `info` or `rejected`, and each event carries `attempt`, `worker_id` and `fence`) |
 | `POST /api/tasks/{id}/cancel` | Idempotent. Queued: CANCELLED at once, **200**. Running: sets `cancel_requested`, **202**; the worker stops it at its next heartbeat. Repeating either is a no-op with the same status. **409** `task_already_finished` if it already SUCCEEDED, FAILED or went DEAD |
@@ -215,11 +303,12 @@ python -m pytest -q
 ```
 
 - `tests/test_phase1.py`: the state machine, retries, cancel, timeouts and the REST API.
-- `tests/test_api.py`: the API contract: the error envelope, strict parameters, cursor
+- `tests/test_api.py`: the API contract: the error envelope, strict parameters and payloads, cursor
   pagination (ties, inserts between pages, malformed cursors), cancel status codes, and
   that the lease-recovery scan uses its partial index.
 - `tests/test_phase2.py`:
   - atomic claiming under concurrency, jittered backoff, leases, fencing and idempotency
+  - worker ids that stay unique across supervisor restarts
   - an integration test with real worker processes under the supervisor
 - `tests/test_metrics.py`, `tests/test_demos.py`: the metrics endpoints and the demo
   scenarios (some run end to end with real workers).
@@ -234,5 +323,3 @@ python -m pytest -q
   - provider dedup when the ledger write is lost
   - the worker's own timeout and lease-lost grace periods
   - an exhaustive check of the transition table
-
-  Tests marked `xfail(strict=True)` record known bugs; each `reason` names the bug.

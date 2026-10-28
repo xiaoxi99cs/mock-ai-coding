@@ -4,10 +4,11 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from taskconsole import handlers
+from taskconsole import handlers, supervisor
 from taskconsole.api import create_app
 from taskconsole.handlers import TaskContext
 from taskconsole.store import IdempotencyConflict, LeaseLost, TaskStore
+from taskconsole.supervisor import Supervisor
 from taskconsole.worker import Worker
 
 
@@ -193,6 +194,50 @@ def test_api_idempotency_and_pools(tmp_path):
         assert c.post("/api/tasks", json={**body, "payload": {"seconds": 9}}).status_code == 409
         assert c.post("/api/tasks", json={"type": "sleep", "pool": "nope"}).status_code == 422
         assert c.put("/api/pools/default", json={"size": 5}).json()["default"] == 5
+
+
+# -- 6. worker registry across supervisor restarts ------------------------------
+
+class FakePopen:
+    pids = iter(range(1000, 2000))
+
+    def __init__(self, cmd, cwd=None):
+        self.pid = next(self.pids)
+
+    def poll(self):
+        return None
+
+
+def test_restarted_supervisor_never_reuses_worker_ids(tmp_path, clock, monkeypatch):
+    """Regression: ids restarted at `<pool>-1`, so a new process inherited the old row (its
+    stopped_at, exit code and counters) and vanished from the worker list 60s later."""
+    monkeypatch.setattr(supervisor.subprocess, "Popen", FakePopen)
+    path = str(tmp_path / "w.db")
+
+    first = Supervisor(TaskStore(path, clock=clock), path, {"default": 2})
+    first.tick()
+    old_ids = set(first.procs)
+    first.store.worker_exited("default-1", "stopped", 0)  # one exited cleanly; the other is orphaned
+
+    clock.advance(10)
+    store = TaskStore(path, clock=clock)  # app restart: fresh store, fresh supervisor
+    second = Supervisor(store, path, {"default": 2})
+    second.store.mark_orphaned_workers()  # what start() does before its first tick
+    second.tick()
+    assert old_ids.isdisjoint(second.procs)
+
+    clock.advance(61)  # past list_workers' 60s window for exited workers
+    rows = {w["id"]: w for w in store.list_workers()}
+    assert set(rows) == set(second.procs)  # old rows aged out, new workers still listed
+    assert all(w["stopped_at"] is None and w["tasks_succeeded"] == 0 for w in rows.values())
+
+
+def test_orphaned_workers_are_marked_dead_at_startup(store):
+    store.register_worker("default-1", "default", 1, "busy")
+    store.register_worker("default-2", "default", 2, "idle")
+    store.worker_exited("default-2", "stopped", 0)
+    assert store.mark_orphaned_workers() == 1
+    assert {w["id"]: w["status"] for w in store.list_workers()} == {"default-1": "dead", "default-2": "stopped"}
 
 
 # -- integration: real worker processes + supervisor -------------------------

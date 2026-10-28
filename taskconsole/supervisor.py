@@ -6,7 +6,6 @@
 * Each tick also recovers expired leases, so the UI shows recovery even when no worker is claiming.
 """
 
-import itertools
 import logging
 import signal
 import subprocess
@@ -40,7 +39,6 @@ class Supervisor:
         self.drain_grace_s = drain_grace_s
         self.tick_s = tick_s
         self.procs: dict[str, Proc] = {}
-        self._seq = itertools.count(1)
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -49,6 +47,8 @@ class Supervisor:
     # -- lifecycle --------------------------------------------------------
 
     def start(self):
+        if n := self.store.mark_orphaned_workers():
+            log.warning("marked %d worker(s) from a previous run as dead", n)
         self._thread = threading.Thread(target=self._loop, daemon=True, name="supervisor")
         self._thread.start()
 
@@ -101,7 +101,7 @@ class Supervisor:
             cb()
 
     def _spawn(self, pool):
-        wid = f"{pool}-{next(self._seq)}"
+        wid = f"{pool}-{self.store.next_worker_seq()}"
         cmd = [sys.executable, "-m", "taskconsole.worker", "--db", self.db_path, "--pool", pool, "--id", wid,
                "--lease", str(self.lease_s), "--heartbeat", str(self.heartbeat_s),
                "--drain-grace", str(self.drain_grace_s)]

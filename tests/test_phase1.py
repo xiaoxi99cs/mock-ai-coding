@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from taskconsole import handlers
 from taskconsole.api import create_app
 from taskconsole.handlers import TaskCancelled, TaskContext
 from taskconsole.states import IllegalTransition, Status, check_transition
@@ -66,6 +67,19 @@ def test_unknown_type_is_non_retryable(store):
     t = store.submit_task("nope", {})
     Worker(store).run_one()
     assert store.get(t["id"])["status"] == "FAILED"
+
+
+def test_invalid_payload_fails_without_retrying(store):
+    """A task that bypassed API validation fails on its first attempt: a retry can't fix bad input."""
+    t = store.submit_task("count_primes", {"n": "abc"}, pool="cpu")
+    Worker(store, pool="cpu").run_one()
+    t = store.get(t["id"])
+    assert t["status"] == "FAILED" and t["attempts"] == 1 and "invalid payload" in t["error"]
+
+
+def test_validated_payload_fills_defaults_and_coerces():
+    spec = handlers.REGISTRY["count_primes"]
+    assert handlers.validate_payload(spec, {"n": "10"}) == {"n": 10, "chunks": 20}
 
 
 def test_cancel_pending_and_terminal(store):

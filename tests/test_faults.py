@@ -389,7 +389,8 @@ def test_provider_dedups_when_ledger_record_is_fenced_off(store, clock):
 
 def test_provider_dedup_survives_repeated_lost_records(store, clock):
     """Ledger write lost on two consecutive attempts: still one external effect, two blocked dupes."""
-    t = store.submit_task("charge_and_email", {"seconds": 0}, max_attempts=3)
+    t = store.submit_task("charge_and_email", {"customer": "c1", "amount_cents": 700, "email": "a@b.c", "seconds": 0},
+                          max_attempts=3)
     tid = t["id"]
     for wid in ("w1", "w2"):
         c = store.claim("default", wid, lease_s=5)

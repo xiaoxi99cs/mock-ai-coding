@@ -48,6 +48,19 @@ def test_validation_errors_carry_field_details(c):
         422, "validation_error")
 
 
+def test_invalid_payload_is_rejected_at_submit(c):
+    e = err(c.post("/api/tasks", json={"type": "count_primes", "payload": {"n": "abc"}}), 422, "invalid_payload")
+    assert e["details"][0]["loc"] == ["n"] and "n:" in e["message"]
+    e = err(c.post("/api/tasks", json={"type": "sleep", "payload": {"secnds": 1}}), 422, "invalid_payload")
+    assert e["details"][0]["type"] == "extra_forbidden"  # a typo is an error, not a silent default
+    assert c.get("/api/tasks").json()["items"] == []  # nothing was enqueued
+
+
+def test_task_types_publish_their_payload_schema(c):
+    schema = c.get("/api/task-types").json()["count_primes"]["payload_schema"]
+    assert schema["properties"]["n"]["type"] == "integer" and schema["additionalProperties"] is False
+
+
 def test_idempotency_conflict_code(c):
     submit(c, idempotency_key="k")
     err(c.post("/api/tasks", json={"type": "sleep", "payload": {"seconds": 9}, "idempotency_key": "k"}),

@@ -3,10 +3,18 @@
 A handler is `fn(ctx, payload) -> result`. It should call `ctx.sleep()` /
 `ctx.progress()` regularly: those are the points where cancellation and the
 timeout are noticed.
+
+Each type declares a pydantic `Payload` model. The API validates against it at submit
+time (422, never enqueued), and the worker validates again before running, turning a
+bad payload into a non-retryable failure: bad input is not something a retry can fix (R3).
+The handler receives the validated payload as a dict, with defaults filled in.
 """
 
 import os
 import time
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .store import LeaseLost  # noqa: F401  (re-exported for handlers)
 
@@ -35,11 +43,27 @@ def crash():
 REGISTRY: dict[str, dict] = {}
 
 
-def handler(name, description, example=None, pool="default"):
+class Payload(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt field is an error, not silently ignored
+
+
+def handler(name, description, example=None, pool="default", payload=Payload):
     def deco(fn):
-        REGISTRY[name] = {"fn": fn, "description": description, "example": example or {}, "pool": pool}
+        REGISTRY[name] = {"fn": fn, "description": description, "example": example or {}, "pool": pool,
+                          "payload": payload}
         return fn
     return deco
+
+
+def validate_payload(spec, payload: dict) -> dict:
+    """Validated payload with defaults filled in. Raises pydantic.ValidationError."""
+    model = spec.get("payload")
+    return payload if model is None else model.model_validate(payload).model_dump()
+
+
+def payload_errors(e: ValidationError) -> list[dict]:
+    """JSON-safe error list (pydantic's `ctx` may hold exception objects)."""
+    return [{k: v for k, v in err.items() if k in ("type", "loc", "msg", "input")} for err in e.errors()]
 
 
 class TaskContext:
@@ -92,7 +116,11 @@ class TaskContext:
                                          crash_before_record=crash if crash_before_record else None)
 
 
-@handler("sleep", "Sleeps for `seconds`, reporting progress 10 times.", {"seconds": 5})
+class SleepPayload(Payload):
+    seconds: float = Field(5, ge=0, le=3600)
+
+
+@handler("sleep", "Sleeps for `seconds`, reporting progress 10 times.", {"seconds": 5}, payload=SleepPayload)
 def sleep_task(ctx, payload):
     seconds = float(payload.get("seconds", 5))
     for i in range(10):
@@ -101,8 +129,13 @@ def sleep_task(ctx, payload):
     return {"slept": seconds}
 
 
+class CountPrimesPayload(Payload):
+    n: int = Field(300000, ge=0, le=50_000_000)
+    chunks: int = Field(20, ge=1, le=1000)
+
+
 @handler("count_primes", "Counts primes below `n` in chunks; checkpoints so a retry resumes.",
-         {"n": 300000, "chunks": 20}, pool="cpu")
+         {"n": 300000, "chunks": 20}, pool="cpu", payload=CountPrimesPayload)
 def count_primes(ctx, payload):
     n, chunks = int(payload.get("n", 300000)), int(payload.get("chunks", 20))
     state = ctx.checkpoint or {"chunk": 0, "count": 0}
@@ -127,8 +160,13 @@ def _is_prime(k):
     return True
 
 
+class FlakyPayload(Payload):
+    fail_times: int = Field(2, ge=0)
+    seconds: float = Field(1, ge=0, le=3600)
+
+
 @handler("flaky", "Fails with a transient error on the first `fail_times` attempts, then succeeds.",
-         {"fail_times": 2, "seconds": 1})
+         {"fail_times": 2, "seconds": 1}, payload=FlakyPayload)
 def flaky(ctx, payload):
     ctx.sleep(float(payload.get("seconds", 1)))
     if ctx.attempt <= int(payload.get("fail_times", 2)):
@@ -137,14 +175,26 @@ def flaky(ctx, payload):
     return {"ok": True, "succeeded_on_attempt": ctx.attempt}
 
 
-@handler("fail_permanent", "Always fails with a non-retryable error (bad input).", {"reason": "invalid account id"})
+class FailPermanentPayload(Payload):
+    reason: str = "invalid input"
+
+
+@handler("fail_permanent", "Always fails with a non-retryable error (bad input).", {"reason": "invalid account id"},
+         payload=FailPermanentPayload)
 def fail_permanent(ctx, payload):
     ctx.sleep(0.5)
     raise NonRetryableError(payload.get("reason", "invalid input"))
 
 
+class CrashPayload(Payload):
+    seconds: float = Field(4, ge=0, le=3600)
+    crash_at: float = Field(0.5, ge=0, le=1)
+    crash_on_attempts: list[int] = [1]
+
+
 @handler("crash", "Dies (kill -9 style) at `crash_at` progress on the listed attempts. "
-         "Recovered when its lease expires.", {"seconds": 4, "crash_at": 0.5, "crash_on_attempts": [1]})
+         "Recovered when its lease expires.", {"seconds": 4, "crash_at": 0.5, "crash_on_attempts": [1]},
+         payload=CrashPayload)
 def crash_task(ctx, payload):
     seconds = float(payload.get("seconds", 4))
     crash_at = float(payload.get("crash_at", 0.5))
@@ -156,23 +206,41 @@ def crash_task(ctx, payload):
     return {"survived_on_attempt": ctx.attempt}
 
 
-@handler("poison", "Crashes its worker on every attempt: a poison pill that must end up DEAD.", {"seconds": 1})
+class PoisonPayload(Payload):
+    seconds: float = Field(1, ge=0, le=3600)
+
+
+@handler("poison", "Crashes its worker on every attempt: a poison pill that must end up DEAD.", {"seconds": 1},
+         payload=PoisonPayload)
 def poison(ctx, payload):
     ctx.sleep(float(payload.get("seconds", 1)))
     crash()
 
 
+class HangPayload(Payload):
+    seconds: float = Field(3600, ge=0)
+
+
 @handler("hang", "Ignores the context and never returns. The worker enforces the hard timeout by "
-         "exiting; the supervisor restarts it.", {"seconds": 3600})
+         "exiting; the supervisor restarts it.", {"seconds": 3600}, payload=HangPayload)
 def hang(ctx, payload):
     time.sleep(float(payload.get("seconds", 3600)))
     return {"woke": True}
 
 
+class ChargeAndEmailPayload(Payload):
+    customer: str
+    amount_cents: int = Field(gt=0)
+    email: str
+    crash: Literal["after_charge", "before_record"] | None = None
+    seconds: float = Field(1, ge=0, le=3600)
+
+
 @handler("charge_and_email", "Charges a card then emails a receipt, both as idempotent side effects. "
          "`crash`: 'after_charge' kills the worker after the charge is recorded; 'before_record' kills it "
          "after the provider charged but before our ledger saw it.",
-         {"customer": "cus_42", "amount_cents": 1999, "email": "ada@example.com", "crash": "after_charge"})
+         {"customer": "cus_42", "amount_cents": 1999, "email": "ada@example.com", "crash": "after_charge"},
+         payload=ChargeAndEmailPayload)
 def charge_and_email(ctx, payload):
     first = ctx.attempt == 1
     mode = payload.get("crash")

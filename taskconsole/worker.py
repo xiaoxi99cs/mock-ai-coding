@@ -21,6 +21,8 @@ import time
 import traceback
 import uuid
 
+from pydantic import ValidationError
+
 from . import handlers
 from .handlers import NonRetryableError, TaskCancelled, TaskContext, TaskReleased
 from .store import LeaseLost, TaskStore
@@ -106,7 +108,11 @@ class Worker:
         try:
             if spec is None:
                 raise NonRetryableError(f"unknown task type {task['type']!r}")
-            outcome["result"] = spec["fn"](ctx, task["payload"])
+            try:
+                payload = handlers.validate_payload(spec, task["payload"])
+            except ValidationError as e:  # bypassed the API (or the schema changed since submit)
+                raise NonRetryableError(f"invalid payload: {handlers.payload_errors(e)}") from None
+            outcome["result"] = spec["fn"](ctx, payload)
         except BaseException as e:  # noqa: BLE001 - everything is reported via `outcome`
             outcome["exc"] = e
             outcome["tb"] = traceback.format_exc()

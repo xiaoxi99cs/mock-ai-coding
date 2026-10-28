@@ -22,7 +22,7 @@ from fastapi import FastAPI, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import demos, handlers, metrics
@@ -138,7 +138,9 @@ def create_app(db_path: str = "tasks.db", start_workers: bool = True, pools: dic
 
     @app.get("/api/task-types")
     def task_types():
-        return {name: {k: v for k, v in spec.items() if k != "fn"} for name, spec in handlers.REGISTRY.items()}
+        return {name: {"description": spec["description"], "example": spec["example"], "pool": spec["pool"],
+                       "payload_schema": spec["payload"].model_json_schema()}
+                for name, spec in handlers.REGISTRY.items()}
 
     @app.post("/api/tasks", status_code=201)
     def submit(req: SubmitRequest, response: Response):
@@ -147,6 +149,12 @@ def create_app(db_path: str = "tasks.db", start_workers: bool = True, pools: dic
         if spec is None:
             raise ApiError(422, "unknown_task_type", f"unknown task type {req.type!r}",
                            {"types": sorted(handlers.REGISTRY)})
+        try:
+            handlers.validate_payload(spec, req.payload)
+        except ValidationError as e:
+            errors = handlers.payload_errors(e)
+            fields = "; ".join(f"{'.'.join(map(str, err['loc'])) or 'payload'}: {err['msg']}" for err in errors)
+            raise ApiError(422, "invalid_payload", f"invalid payload for task type {req.type!r}: {fields}", errors)
         task, created = store.submit(req.type, req.payload, pool=require_pool(req.pool or spec["pool"]),
                                      priority=req.priority, max_attempts=req.max_attempts,
                                      timeout_s=req.timeout_s, idempotency_key=req.idempotency_key)

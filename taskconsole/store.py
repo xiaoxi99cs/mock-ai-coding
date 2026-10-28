@@ -398,6 +398,22 @@ class TaskStore:
 
     # -- workers ----------------------------------------------------------
 
+    def next_worker_seq(self) -> int:
+        """A worker number never handed out before, by any supervisor, across restarts. Worker ids
+        are the `workers` primary key: reusing one would merge a new process into an old row."""
+        with self.tx() as c:
+            self._incr(c, "workers_spawned")
+            return c.execute("SELECT value FROM counters WHERE name='workers_spawned'").fetchone()["value"]
+
+    def mark_orphaned_workers(self) -> int:
+        """At supervisor startup: rows still 'alive' belong to a previous supervisor's processes
+        (which exit on their own once orphaned). Mark them dead; their leases expire as usual."""
+        with self.tx() as c:
+            return c.execute(
+                "UPDATE workers SET status='dead', stopped_at=?, current_task_id=NULL"
+                " WHERE status NOT IN ('stopped','dead')", (self.clock(),)
+            ).rowcount
+
     def register_worker(self, worker_id, pool, pid, status="starting"):
         with self.tx() as c:
             c.execute(
