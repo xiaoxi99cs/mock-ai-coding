@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     request_hash     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(pool, status, run_after);
+-- The claim's candidate scan: only claimable tasks, already in claim order, so a claim reads
+-- the first row of its pool whose run_after has passed instead of sorting the backlog.
+CREATE INDEX IF NOT EXISTS idx_tasks_ready ON tasks(pool, priority DESC, run_after, created_at)
+    WHERE status IN ('PENDING','RETRY_WAIT');
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_finished ON tasks(finished_at);
 -- Lease recovery runs on every claim. A lease is set only while CLAIMED/RUNNING, so this

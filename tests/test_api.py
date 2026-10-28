@@ -1,9 +1,13 @@
 """API contract: one error shape, strict input validation, stable cursor pagination, idempotent cancel."""
 
+import inspect
+
 import pytest
 from fastapi.testclient import TestClient
 
 from taskconsole.api import create_app
+from taskconsole.states import CLAIMABLE
+from taskconsole.store import TaskStore
 
 
 @pytest.fixture
@@ -163,7 +167,18 @@ def test_cancel_finished_task_conflicts(c, app):
     assert "SUCCEEDED" in err(c.post(f"/api/tasks/{tid}/cancel"), 409, "task_already_finished")["message"]
 
 
-# -- lease recovery stays index-backed ---------------------------------------------
+# -- the claim and lease recovery stay index-backed ----------------------------------
+
+def test_claim_reads_ready_tasks_in_order_from_partial_index(app):
+    """The candidate scan walks idx_tasks_ready in claim order: no full scan, no sort of the backlog.
+    The index is partial, so the claim must spell the claimable statuses as the same literals."""
+    src = inspect.getsource(TaskStore.claim)
+    assert "status IN ('PENDING','RETRY_WAIT')" in src and set(CLAIMABLE) == {"PENDING", "RETRY_WAIT"}
+    plan = [row["detail"] for row in app.state.store.conn().execute(
+        "EXPLAIN QUERY PLAN SELECT id FROM tasks WHERE pool='default' AND status IN ('PENDING','RETRY_WAIT')"
+        " AND run_after<=0 ORDER BY priority DESC, run_after, created_at LIMIT 1")]
+    assert any("idx_tasks_ready" in d for d in plan) and not any("TEMP B-TREE" in d for d in plan), plan
+
 
 def test_lease_recovery_scan_uses_partial_index(app):
     plan = app.state.store.conn().execute(

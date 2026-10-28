@@ -2,9 +2,8 @@
 
 Concurrency model
 -----------------
-* Claiming is a compare-and-swap: pick a candidate, then
-  `UPDATE … WHERE id=? AND status=<seen> RETURNING *`. Each claim bumps the
-  task's fencing token (`fence`) and sets a lease.
+* Claiming is one statement: `UPDATE … WHERE id=(SELECT best ready task) RETURNING *`.
+  Each claim bumps the task's fencing token (`fence`) and sets a lease.
 * Every worker-side write carries (task_id, fence) and only applies if the task is
   still CLAIMED/RUNNING with that same fence. A worker whose lease expired (it
   crashed, hung, or was paused) can therefore never overwrite the state written
@@ -22,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 
 from . import db
-from .states import ACTIVE, CLAIMABLE, TERMINAL, IllegalTransition, Status, check_transition
+from .states import ACTIVE, TERMINAL, IllegalTransition, Status, check_transition
 
 
 class TaskNotFound(Exception):
@@ -233,26 +232,36 @@ class TaskStore:
     # -- worker API (everything below a claim is fenced) -------------------
 
     def claim(self, pool: str, worker_id: str, lease_s: float = 30.0) -> dict | None:
-        """Atomically claim the best ready task in `pool`: bump attempts + fence, set a lease."""
+        """Atomically claim the best ready task in `pool`: bump attempts + fence, set a lease.
+
+        Picking and taking the task is one statement, so there is no window between "this
+        task is free" and "it is mine" for another claimer to slip into, whatever the isolation
+        level. (The Postgres version of the same statement adds `FOR UPDATE SKIP LOCKED` to the
+        subquery, so concurrent claimers skip each other's rows instead of queueing on them.)
+        The status literals match the partial index `idx_tasks_ready`, which yields candidates
+        already in claim order: the first row with `run_after <= now` is the answer, no sort.
+        """
         with self.tx() as c:
             now = self.clock()
             self._recover_expired(c, now)
-            while True:
-                cand = c.execute(
-                    "SELECT id, status FROM tasks WHERE pool=? AND status IN (?,?) AND run_after<=?"
-                    " ORDER BY priority DESC, run_after, created_at LIMIT 1",
-                    (pool, *CLAIMABLE, now),
-                ).fetchone()
-                if cand is None:
-                    return None
-                row = c.execute(
-                    "UPDATE tasks SET status=?, fence=fence+1, attempts=attempts+1, worker_id=?,"
-                    " lease_expires_at=?, updated_at=? WHERE id=? AND status=? RETURNING *",
-                    (Status.CLAIMED, worker_id, now + lease_s, now, cand["id"], cand["status"]),
-                ).fetchone()
-                if row is not None:  # CAS won (always, under SQLite's write lock; loop is for portability)
-                    break
-            self._event(c, row["id"], cand["status"], Status.CLAIMED, row["attempts"], worker_id,
+            row = c.execute(
+                "UPDATE tasks SET status=?, fence=fence+1, attempts=attempts+1, worker_id=?,"
+                " lease_expires_at=?, updated_at=?"
+                " WHERE id = (SELECT id FROM tasks"
+                "             WHERE pool=? AND status IN ('PENDING','RETRY_WAIT') AND run_after<=?"
+                "             ORDER BY priority DESC, run_after, created_at LIMIT 1)"
+                " RETURNING *",
+                (Status.CLAIMED, worker_id, now + lease_s, now, pool, now),
+            ).fetchone()
+            if row is None:
+                return None
+            # RETURNING only sees the new row. The status we claimed from is the target of the
+            # task's latest transition event: every status change appends one (W4).
+            frm = c.execute(
+                "SELECT to_status FROM task_events WHERE task_id=? AND kind='transition' ORDER BY id DESC LIMIT 1",
+                (row["id"],),
+            ).fetchone()["to_status"]
+            self._event(c, row["id"], frm, Status.CLAIMED, row["attempts"], worker_id,
                         f"claimed by {worker_id} (lease {lease_s:g}s)", fence=row["fence"])
             c.execute("UPDATE workers SET status='busy', current_task_id=?, last_heartbeat=? WHERE id=?",
                       (row["id"], now, worker_id))

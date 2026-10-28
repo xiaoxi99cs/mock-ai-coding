@@ -64,8 +64,13 @@ draining worker, and it does not count as an attempt.
 
 ### Reliability in brief
 
-- **Atomic claiming.** A claim is one compare-and-swap `UPDATE … RETURNING`. It
-  increments `attempts` and the fencing token `fence`, and sets `lease_expires_at`.
+- **Atomic claiming.** A claim is one statement:
+  `UPDATE tasks SET … WHERE id = (SELECT the best ready task … LIMIT 1) RETURNING *`.
+  Picking the task and taking it cannot be separated, so two workers can never claim the
+  same task. The claim increments `attempts` and the fencing token `fence`, and sets
+  `lease_expires_at`. A partial index over the claimable tasks (`idx_tasks_ready`) keeps
+  them in claim order (priority, then `run_after`, then age), so a claim reads one row
+  instead of sorting the backlog.
 - **Retries.** Retryable errors go to RETRY_WAIT with `run_after = now + backoff`.
   Backoff is exponential with full jitter: `uniform(0, min(cap, base·2^(attempt-1)))`,
   with a base of 1 s and a cap of 30 s. Non-retryable errors go to FAILED. When attempts
@@ -305,9 +310,10 @@ python -m pytest -q
 - `tests/test_phase1.py`: the state machine, retries, cancel, timeouts and the REST API.
 - `tests/test_api.py`: the API contract: the error envelope, strict parameters and payloads, cursor
   pagination (ties, inserts between pages, malformed cursors), cancel status codes, and
-  that the lease-recovery scan uses its partial index.
+  that the claim and the lease-recovery scan use their partial indexes.
 - `tests/test_phase2.py`:
-  - atomic claiming under concurrency, jittered backoff, leases, fencing and idempotency
+  - atomic claiming under concurrency (threads and separate processes), jittered backoff, leases,
+    fencing and idempotency
   - worker ids that stay unique across supervisor restarts
   - an integration test with real worker processes under the supervisor
 - `tests/test_metrics.py`, `tests/test_demos.py`: the metrics endpoints and the demo

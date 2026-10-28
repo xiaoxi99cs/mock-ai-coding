@@ -1,3 +1,4 @@
+import multiprocessing
 import threading
 import time
 
@@ -50,6 +51,41 @@ def test_concurrent_claims_never_double_claim(tmp_path):
     for th in threads:
         th.join()
     assert sorted(claimed) == sorted(ids)  # every task exactly once
+
+
+def _claim_all(path, n, out):
+    s = TaskStore(path)
+    out.put([t["id"] for t in iter(lambda: s.claim("default", f"p{n}", lease_s=60), None)])
+
+
+def test_concurrent_claims_across_processes_never_double_claim(tmp_path):
+    """Same guarantee with separate OS processes, as real workers run: separate connections
+    racing for SQLite's file lock, not threads sharing one interpreter."""
+    store = TaskStore(str(tmp_path / "p.db"))
+    ids = {store.submit("sleep", {"seconds": 0})[0]["id"] for _ in range(200)}
+    ctx = multiprocessing.get_context("spawn")
+    out = ctx.Queue()
+    procs = [ctx.Process(target=_claim_all, args=(store.path, i, out)) for i in range(6)]
+    for p in procs:
+        p.start()
+    claimed = [tid for _ in procs for tid in out.get(timeout=60)]
+    for p in procs:
+        p.join(10)
+    assert sorted(claimed) == sorted(ids)  # every task exactly once
+    assert all(t["fence"] == 1 and t["attempts"] == 1 for t in store.list_tasks(limit=500))
+
+
+def test_claim_event_records_the_status_it_claimed_from(store, clock):
+    t = store.submit_task("sleep", {"seconds": 0})
+    c = store.claim("default", "w1", lease_s=5)
+    store.start(t["id"], c["fence"], "w1")
+    store.fail(t["id"], c["fence"], "w1", "transient")  # -> RETRY_WAIT
+    clock.advance(60)
+    c = store.claim("default", "w2", lease_s=5)
+    store.release(t["id"], c["fence"], "w2", "draining")  # -> PENDING
+    store.claim("default", "w3", lease_s=5)
+    claims = [(e["from_status"], e["worker_id"]) for e in store.events(t["id"]) if e["to_status"] == "CLAIMED"]
+    assert claims == [("PENDING", "w1"), ("RETRY_WAIT", "w2"), ("PENDING", "w3")]
 
 
 # -- 2. backoff with full jitter -------------------------------------------
