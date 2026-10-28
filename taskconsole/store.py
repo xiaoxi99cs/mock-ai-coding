@@ -146,7 +146,8 @@ class TaskStore:
 
     def backoff(self, attempt: int) -> float:
         """Exponential backoff with full jitter: uniform(0, min(cap, base * 2^(attempt-1)))."""
-        return min(self.backoff_cap, self.backoff_base * 2 ** (attempt - 1)) * self.rng()
+        # Cap the exponent too: 2 ** 1024 overflows a float, and 2 ** 63 already exceeds any cap.
+        return min(self.backoff_cap, self.backoff_base * 2 ** min(attempt - 1, 63)) * self.rng()
 
     # -- client API -------------------------------------------------------
 
