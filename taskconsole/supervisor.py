@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,7 +53,10 @@ class Supervisor:
         self._thread = threading.Thread(target=self._loop, daemon=True, name="supervisor")
         self._thread.start()
 
-    def stop(self, timeout=8.0):
+    def stop(self, timeout=None):
+        """Drain every worker. The wait must outlast `drain_grace_s`, or a worker is SIGKILLed
+        before it can release its task, which then waits for lease expiry and burns an attempt."""
+        deadline = time.monotonic() + (self.drain_grace_s + 5.0 if timeout is None else timeout)
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
@@ -62,7 +66,7 @@ class Supervisor:
                 self._signal(p, signal.SIGTERM)
             for p in self.procs.values():
                 try:
-                    p.popen.wait(timeout=timeout)
+                    p.popen.wait(timeout=max(0.0, deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
                     p.popen.kill()
                 self.store.worker_exited(p.id, "stopped", p.popen.returncode)

@@ -35,6 +35,17 @@ def crash():
 REGISTRY: dict[str, dict] = {}
 
 
+def arg(payload, name, default, conv=float, minimum=None):
+    """Read a payload field. Bad input is a NonRetryableError: retrying cannot fix it (GUIDELINES R3)."""
+    try:
+        value = conv(payload.get(name, default))
+    except (TypeError, ValueError) as e:
+        raise NonRetryableError(f"payload.{name}: {e}") from None
+    if minimum is not None and value < minimum:
+        raise NonRetryableError(f"payload.{name} must be >= {minimum}, got {value}")
+    return value
+
+
 def handler(name, description, example=None, pool="default"):
     def deco(fn):
         REGISTRY[name] = {"fn": fn, "description": description, "example": example or {}, "pool": pool}
@@ -94,7 +105,7 @@ class TaskContext:
 
 @handler("sleep", "Sleeps for `seconds`, reporting progress 10 times.", {"seconds": 5})
 def sleep_task(ctx, payload):
-    seconds = float(payload.get("seconds", 5))
+    seconds = arg(payload, "seconds", 5, minimum=0)
     for i in range(10):
         ctx.sleep(seconds / 10)
         ctx.progress((i + 1) / 10)
@@ -104,7 +115,7 @@ def sleep_task(ctx, payload):
 @handler("count_primes", "Counts primes below `n` in chunks; checkpoints so a retry resumes.",
          {"n": 300000, "chunks": 20}, pool="cpu")
 def count_primes(ctx, payload):
-    n, chunks = int(payload.get("n", 300000)), int(payload.get("chunks", 20))
+    n, chunks = arg(payload, "n", 300000, int, minimum=0), arg(payload, "chunks", 20, int, minimum=1)
     state = ctx.checkpoint or {"chunk": 0, "count": 0}
     size = max(1, n // chunks)
     for i in range(state["chunk"], chunks):
@@ -130,8 +141,9 @@ def _is_prime(k):
 @handler("flaky", "Fails with a transient error on the first `fail_times` attempts, then succeeds.",
          {"fail_times": 2, "seconds": 1})
 def flaky(ctx, payload):
-    ctx.sleep(float(payload.get("seconds", 1)))
-    if ctx.attempt <= int(payload.get("fail_times", 2)):
+    seconds, fail_times = arg(payload, "seconds", 1, minimum=0), arg(payload, "fail_times", 2, int)
+    ctx.sleep(seconds)
+    if ctx.attempt <= fail_times:
         raise ConnectionError(f"transient upstream error on attempt {ctx.attempt}")
     ctx.progress(1.0)
     return {"ok": True, "succeeded_on_attempt": ctx.attempt}
