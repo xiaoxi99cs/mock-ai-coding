@@ -25,9 +25,9 @@ class Status(StrEnum):
     CANCELLED = "CANCELLED"
 
 
-TERMINAL = frozenset({Status.SUCCEEDED, Status.FAILED, Status.DEAD, Status.CANCELLED})
-CLAIMABLE = frozenset({Status.PENDING, Status.RETRY_WAIT})
-ACTIVE = frozenset({Status.CLAIMED, Status.RUNNING})
+TERMINAL = frozenset({Status.SUCCEEDED, Status.FAILED, Status.DEAD, Status.CANCELLED})  # final
+CLAIMABLE = frozenset({Status.PENDING, Status.RETRY_WAIT})  # waiting in the queue
+ACTIVE = frozenset({Status.CLAIMED, Status.RUNNING})        # owned by a worker, holds a lease
 
 TRANSITIONS: dict[Status, frozenset[Status]] = {
     Status.CREATED: frozenset({Status.PENDING, Status.CANCELLED}),

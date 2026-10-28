@@ -43,24 +43,33 @@ def handler(name, description, example=None, pool="default"):
 
 
 class TaskContext:
-    """Handed to a task handler. The flags are set by the worker's heartbeat loop
-    (another thread); `check()` turns them into exceptions inside the handler."""
+    """Handed to a task handler: the bridge between the handler thread and the worker.
+
+    Python can't stop a thread from outside, so stopping is cooperative: the worker's
+    heartbeat loop (main thread) sets the flags below, and the handler calls
+    `ctx.sleep()` / `ctx.progress()` often, which call `check()`. `check()` raises the
+    matching exception inside the handler, and the worker turns that into the next
+    status (see `Worker._record`). A handler that never calls them (e.g. `hang`) is
+    stopped by the worker's hard timeout instead.
+    """
 
     def __init__(self, store, task, worker_id):
         self.store = store
         self.task = task
         self.task_id = task["id"]
         self.fence = task["fence"]
-        self.attempt = task["attempts"]
+        self.attempt = task["attempts"]  # 1 on the first try, 2 on the first retry, ...
         self.worker_id = worker_id
-        self.checkpoint = task.get("checkpoint")
+        self.checkpoint = task.get("checkpoint")  # saved by an earlier attempt: lets a retry resume
         self.started = time.monotonic()
         self.timeout_s = task["timeout_s"]
-        self.cancel_requested = False
-        self.lease_lost = False
-        self.release_requested = False
+        # Set by the worker's main thread, read by the handler thread via check().
+        self.cancel_requested = False   # user cancelled the task
+        self.lease_lost = False         # another worker owns the task now: stop, write nothing
+        self.release_requested = False  # worker is draining: stop so the task can be handed back
 
     def check(self):
+        """Raise if the handler should stop. Called at every ctx.sleep()/progress()/effect()."""
         if self.lease_lost:
             raise LeaseLost("lease lost; stopping without writing")
         if self.cancel_requested:
@@ -71,6 +80,7 @@ class TaskContext:
             raise TaskTimeout(f"exceeded timeout of {self.timeout_s:g}s")
 
     def progress(self, fraction: float, checkpoint=None):
+        """Save progress (and optionally a checkpoint) to the DB. This write is fenced too."""
         self.check()
         if self.store.report_progress(self.task_id, self.fence, self.worker_id, fraction, checkpoint):
             self.cancel_requested = True
@@ -79,6 +89,7 @@ class TaskContext:
         self.check()
 
     def sleep(self, seconds: float):
+        """Like time.sleep, but wakes every 0.1s to check for cancel/timeout/drain."""
         end = time.monotonic() + seconds
         while (left := end - time.monotonic()) > 0:
             self.check()

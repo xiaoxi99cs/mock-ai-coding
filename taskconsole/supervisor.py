@@ -1,5 +1,18 @@
 """Supervisor: keeps each pool at its desired number of worker processes.
 
+Runs as a background thread inside the API server. Each worker is a separate OS process
+(`python -m taskconsole.worker`), so the console can really `kill -9` one.
+
+Every `tick_s` the supervisor:
+  1. notices worker processes that have exited, and records why;
+  2. starts or drains processes so each pool has `desired[pool]` workers;
+  3. recovers expired leases.
+
+Note the supervisor does NOT rescue the tasks of a dead worker itself. That happens
+through the lease: the dead worker stops renewing it, it expires, and lease recovery
+(`store._recover_expired`) retries the task. So the design stays correct even if the
+supervisor is down.
+
 * A worker that exits unexpectedly (crash, kill -9, hard timeout) is marked dead and replaced.
 * Scaling a pool down drains surplus workers (SIGTERM, graceful).
 * Kill / pause / resume / drain controls exist so the console can inject faults.
@@ -21,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @dataclass
 class Proc:
+    """One worker process started by this supervisor."""
     id: str
     pool: str
     popen: subprocess.Popen
@@ -34,14 +48,14 @@ class Supervisor:
                  drain_grace_s=10.0, tick_s=0.5):
         self.store = store
         self.db_path = str(Path(db_path).resolve())
-        self.desired = dict(pools)
+        self.desired = dict(pools)  # pool name -> how many worker processes we want
         self.lease_s = lease_s
         self.heartbeat_s = heartbeat_s
         self.drain_grace_s = drain_grace_s
         self.tick_s = tick_s
         self.procs: dict[str, Proc] = {}
         self._seq = itertools.count(1)
-        self._lock = threading.RLock()
+        self._lock = threading.RLock()  # the tick thread and API requests both touch `procs`
         self._stop = threading.Event()
         self._thread = None
         self.on_tick = []  # callbacks (e.g. metrics sampler)
@@ -53,12 +67,13 @@ class Supervisor:
         self._thread.start()
 
     def stop(self, timeout=8.0):
+        """Shut down: SIGTERM every worker (graceful drain), SIGKILL any that don't exit in time."""
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
         with self._lock:
             for p in self.procs.values():
-                self._signal(p, signal.SIGCONT)
+                self._signal(p, signal.SIGCONT)  # a paused (SIGSTOPped) process can't handle SIGTERM
                 self._signal(p, signal.SIGTERM)
             for p in self.procs.values():
                 try:
@@ -78,8 +93,10 @@ class Supervisor:
 
     def tick(self):
         with self._lock:
+            # 1. Reap exited processes. Exit code 0 after a drain we asked for = clean stop;
+            #    anything else (kill -9, crash, hard timeout exit 70/71) = dead, replace it.
             for p in list(self.procs.values()):
-                rc = p.popen.poll()
+                rc = p.popen.poll()  # None = still running
                 if rc is None:
                     continue
                 del self.procs[p.id]
@@ -90,12 +107,15 @@ class Supervisor:
                     log.warning("worker %s died (exit %s); restarting", p.id, rc)
                     self.store.worker_exited(p.id, "dead", rc)
                     self.store.incr("worker_restarts")
+            # 2. Scale each pool to its desired size: spawn the missing workers, drain the extra.
+            #    Removing a dead process in step 1 makes the pool short, so it is replaced here.
             for pool, want in self.desired.items():
                 live = [p for p in self.procs.values() if p.pool == pool and not p.draining]
                 for _ in range(want - len(live)):
                     self._spawn(pool)
                 for p in live[want:] if len(live) > want else []:
                     self.drain(p.id)
+        # 3. Recover expired leases even when no worker is claiming (claim() also does this).
         self.store.recover_expired()
         for cb in self.on_tick:
             cb()
@@ -126,6 +146,7 @@ class Supervisor:
         return p
 
     def kill(self, wid):
+        """kill -9: no cleanup at all. Its task is recovered when the lease expires."""
         with self._lock:
             p = self._get(wid)
             self._signal(p, signal.SIGCONT)
@@ -145,6 +166,7 @@ class Supervisor:
             p.paused = False
 
     def drain(self, wid):
+        """SIGTERM: the worker finishes (or hands back) its task, then exits with 0."""
         with self._lock:
             p = self._get(wid)
             p.draining = True
