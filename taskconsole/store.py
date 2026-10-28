@@ -160,6 +160,7 @@ class TaskStore:
         """Returns (task, created). With an idempotency key, a repeat submission returns the
         original task (created=False); a different body under the same key raises."""
         payload = payload or {}
+        idempotency_key = idempotency_key or None  # "" is not a key; never store it in the UNIQUE column
         req_hash = hashlib.sha256(
             json.dumps([type, payload, pool, priority, max_attempts, timeout_s], sort_keys=True).encode()
         ).hexdigest()
@@ -402,7 +403,11 @@ class TaskStore:
         with self.tx() as c:
             c.execute(
                 "INSERT INTO workers(id, pool, pid, status, started_at, last_heartbeat) VALUES (?,?,?,?,?,?)"
-                " ON CONFLICT(id) DO UPDATE SET pid=excluded.pid, status=excluded.status",
+                # Ids restart at <pool>-1 when the app restarts: a reused id is a new process, so
+                # reset everything; a stale stopped_at would hide it from list_workers().
+                " ON CONFLICT(id) DO UPDATE SET pool=excluded.pool, pid=excluded.pid, status=excluded.status,"
+                " started_at=excluded.started_at, last_heartbeat=excluded.last_heartbeat, current_task_id=NULL,"
+                " tasks_succeeded=0, tasks_failed=0, exit_code=NULL, stopped_at=NULL",
                 (worker_id, pool, pid, status, self.clock(), self.clock()),
             )
 

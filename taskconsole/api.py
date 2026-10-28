@@ -39,10 +39,10 @@ class SubmitRequest(BaseModel):
     type: str
     payload: dict = Field(default_factory=dict)
     pool: str | None = None
-    priority: int = 0
+    priority: int = Field(0, ge=-2**31, le=2**31 - 1)
     max_attempts: int = Field(3, ge=1, le=20)
     timeout_s: float = Field(60, gt=0, le=3600)
-    idempotency_key: str | None = Field(None, max_length=200)
+    idempotency_key: str | None = Field(None, min_length=1, max_length=200)
 
 
 class PoolSize(BaseModel):
@@ -85,6 +85,10 @@ def _install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(StarletteHTTPException)
     def http_error(request: Request, e: StarletteHTTPException):
         return _error(e.status_code, HTTP_CODES.get(e.status_code, "http_error"), str(e.detail))
+
+    @app.exception_handler(Exception)
+    def internal_error(request: Request, e: Exception):
+        return _error(500, "internal_error", "internal server error")
 
     for exc, status, code in DOMAIN_ERRORS:
         def handler(request: Request, e: Exception, status=status, code=code):
