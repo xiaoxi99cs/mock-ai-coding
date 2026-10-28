@@ -109,15 +109,26 @@ draining worker, and it does not count as an attempt.
 
 All timestamps are store-clock epoch seconds.
 
+Every error has one shape, so clients branch on `code`, never on the message text:
+
+```json
+{"error": {"code": "task_not_found", "message": "task abc not found"}}
+```
+
+Codes: `validation_error` (422, with field-level `details`), `unknown_task_type` and
+`unknown_pool` (422, with the valid values in `details`), `invalid_cursor` (400),
+`task_not_found`, `worker_not_found`, `pool_not_found`, `demo_not_found`, `not_found` (404),
+`method_not_allowed` (405), `idempotency_conflict`, `task_already_finished` (409).
+
 ### Tasks
 
 | method & path | description |
 |---|---|
 | `GET /api/task-types` | `{type: {description, example, pool}}` |
-| `POST /api/tasks` | body `{type, payload?, pool?, priority?, max_attempts? (1-20), timeout_s?, idempotency_key?}`. Returns **201** with the task, **200** with `deduplicated: true` for a repeated key, **409** for a key re-used with a different body, **422** for an unknown type or pool |
-| `GET /api/tasks?status=&pool=&limit=&offset=` | newest first (limit ≤ 500) |
+| `POST /api/tasks` | body `{type, payload?, pool?, priority?, max_attempts? (1-20), timeout_s?, idempotency_key?}`. Returns **201** with the task, **200** with `deduplicated: true` for a repeated key, **409** `idempotency_conflict` for a key re-used with a different body, **422** for an unknown type or pool |
+| `GET /api/tasks?status=&pool=&limit=&cursor=` | newest first; returns `{items, next_cursor}`. Pass `next_cursor` back as `cursor` for the next page (null on the last page). Keyset pagination on `(created_at, id)`, so tasks inserted while paging never shift a page. An unknown `status` or `pool` is a **422**, not an empty list; `limit` is 1-500 |
 | `GET /api/tasks/{id}` | the task plus `events` (its full timeline; `kind` is `transition`, `info` or `rejected`, and each event carries `attempt`, `worker_id` and `fence`) |
-| `POST /api/tasks/{id}/cancel` | queued: CANCELLED at once. Running: sets `cancel_requested` and the worker stops it at its next heartbeat. **409** if the task is already terminal |
+| `POST /api/tasks/{id}/cancel` | Idempotent. Queued: CANCELLED at once, **200**. Running: sets `cancel_requested`, **202**; the worker stops it at its next heartbeat. Repeating either is a no-op with the same status. **409** `task_already_finished` if it already SUCCEEDED, FAILED or went DEAD |
 
 A task row has: `id, type, pool, status, attempts, max_attempts, progress, error, result,
 lease_expires_at, run_after, fence, worker_id, cancel_requested, created_at, started_at,
@@ -128,6 +139,7 @@ finished_at, timeout_s, idempotency_key` (plus `payload`, `checkpoint`, `priorit
 | method & path | description |
 |---|---|
 | `GET /api/workers` | each worker has `state` (`idle`, `busy`, `draining`, `paused`, `stale`, `stopped` or `dead`), `heartbeat_age`, `paused`, `draining`, `current_task_id`, `pid`, `tasks_succeeded` and `tasks_failed`. A worker is `stale` when its heartbeat is older than 3 × heartbeat |
+| `POST /api/workers/{id}/{kill,pause,resume,drain}` | **202**: the signal is sent and the effect shows up in `GET /api/workers` once the process reacts. Any other action is a **422** |
 | `POST /api/workers/{id}/kill` | SIGKILL. The supervisor records a crash and starts a replacement |
 | `POST /api/workers/{id}/pause` / `resume` | SIGSTOP / SIGCONT, which creates a zombie |
 | `POST /api/workers/{id}/drain` | SIGTERM: a graceful exit |
@@ -203,6 +215,9 @@ python -m pytest -q
 ```
 
 - `tests/test_phase1.py`: the state machine, retries, cancel, timeouts and the REST API.
+- `tests/test_api.py`: the API contract: the error envelope, strict parameters, cursor
+  pagination (ties, inserts between pages, malformed cursors), cancel status codes, and
+  that the lease-recovery scan uses its partial index.
 - `tests/test_phase2.py`:
   - atomic claiming under concurrency, jittered backoff, leases, fencing and idempotency
   - an integration test with real worker processes under the supervisor

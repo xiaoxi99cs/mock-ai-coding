@@ -36,7 +36,8 @@ def test_registry_and_listing(idle_client):
 
 
 def test_unknown_demo_404(idle_client):
-    assert idle_client.post("/api/demos/nope").status_code == 404
+    r = idle_client.post("/api/demos/nope")
+    assert r.status_code == 404 and r.json()["error"]["code"] == "demo_not_found"
     assert idle_client.get("/api/demos/runs").json() == []
 
 

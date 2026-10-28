@@ -15,9 +15,9 @@ import time
 import traceback
 import uuid
 
-from fastapi import HTTPException
 
 from . import handlers
+from .errors import ApiError
 from .states import TERMINAL, Status
 from .store import IdempotencyConflict
 
@@ -484,5 +484,5 @@ def register(app, store, sup):
     @app.post("/api/demos/{name}", status_code=202)
     def start_demo(name: str):
         if name not in SCENARIOS:
-            raise HTTPException(404, f"demo {name} not found")
+            raise ApiError(404, "demo_not_found", f"demo {name} not found", {"demos": sorted(SCENARIOS)})
         return runner.start(name)

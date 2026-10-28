@@ -71,8 +71,15 @@ def test_unknown_type_is_non_retryable(store):
 def test_cancel_pending_and_terminal(store):
     t = store.submit_task("sleep", {})
     assert store.cancel(t["id"])["status"] == "CANCELLED"
-    with pytest.raises(IllegalTransition):
-        store.cancel(t["id"])
+    assert store.cancel(t["id"])["status"] == "CANCELLED"  # idempotent: no error, no second event
+    assert [e["to_status"] for e in store.events(t["id"])].count("CANCELLED") == 1
+
+    done = store.submit_task("sleep", {"seconds": 0})
+    c = store.claim("default", "w1")
+    store.start(done["id"], c["fence"], "w1")
+    store.complete(done["id"], c["fence"], "w1")
+    with pytest.raises(IllegalTransition):  # TaskFinished: a finished task can't be cancelled
+        store.cancel(done["id"])
 
 
 def test_cancel_running_is_cooperative(store):
@@ -126,9 +133,9 @@ def test_api_roundtrip(tmp_path):
         tid = r.json()["id"]
         assert c.get(f"/api/tasks/{tid}").json()["events"][0]["to_status"] == "CREATED"
         assert c.post(f"/api/tasks/{tid}/cancel").json()["status"] == "CANCELLED"
-        assert c.post(f"/api/tasks/{tid}/cancel").status_code == 409
+        assert c.post(f"/api/tasks/{tid}/cancel").status_code == 200  # idempotent
         assert c.get("/api/tasks/missing").status_code == 404
-        assert [t["id"] for t in c.get("/api/tasks?status=CANCELLED").json()] == [tid]
+        assert [t["id"] for t in c.get("/api/tasks?status=CANCELLED").json()["items"]] == [tid]
 
 
 def test_terminal_states_have_no_exits():

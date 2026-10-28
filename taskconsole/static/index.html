@@ -253,7 +253,8 @@ async function api(path, opts) {
   let body = null;
   const text = await r.text();
   try { body = text ? JSON.parse(text) : null; } catch { body = text; }
-  if (!r.ok) throw new HttpError(r.status, (body && body.detail) ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : `HTTP ${r.status}`);
+  // Errors share one shape: {"error": {"code", "message", "details"?}}.
+  if (!r.ok) throw new HttpError(r.status, body && body.error ? `${body.error.code}: ${body.error.message}` : `HTTP ${r.status}`);
   return body;
 }
 const post = (path, data, method = "POST") => api(path, {method, headers: {"content-type": "application/json"},
@@ -673,7 +674,7 @@ async function refreshTasks() {
   const rows = await api("/api/tasks?" + want);
   const cur = new URLSearchParams({limit: "200"}); if (state.filter) cur.set("status", state.filter); if (state.poolFilter) cur.set("pool", state.poolFilter);
   if (cur.toString() !== want) return;   // filter changed while in flight
-  state.tasks = rows; renderTasks();
+  state.tasks = rows.items; renderTasks();
   if (!state.metrics) renderTiles();
 }
 async function refreshWorkers() {

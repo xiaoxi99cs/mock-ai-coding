@@ -4,6 +4,15 @@ A durable async task queue with a web console: submit / view / cancel tasks,
 multiple worker pools, crash recovery, metrics, and one-click demos of every
 key feature.
 
+## Goal
+> "Showcase technical excellence on the backend or API design. We will review
+> the code together afterward and we want to see your technical craft at its
+> best in whichever part you choose to prioritize."
+
+Prioritize depth over breadth: correctness under concurrency and crashes, a
+clean and consistent API, and tests that prove the guarantees. The code will be
+reviewed, so every design choice should be deliberate and explainable.
+
 ## Stack
 - Python 3.13, FastAPI + uvicorn, SQLite (WAL) as the single source of truth.
 - Workers are separate OS processes (so a worker can really be `kill -9`'d).
