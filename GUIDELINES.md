@@ -1,9 +1,47 @@
-# Engineering guidelines: DB access and retries
+# Engineering guidelines: API, DB access and retries
 
 Rules every PR must follow. Each rule has an ID (cite it in reviews), a one-line
 reason, and how it is checked. **Enforced** rules have a test in
 `tests/test_guidelines.py` that fails CI when they are broken; **Review** rules are
 checked by the reviewer using the PR template checklist.
+
+## A: API
+
+**A1. Validate every input at the edge, with bounds.** *Enforced.*
+Every request-model `int`/`float` has a lower and an upper bound, every `str` has a
+`max_length`, and every `dict` has a size validator. Query parameters are bounded too.
+*Why:* bad input must get a 422. Unbounded input becomes a 500 (an int too big for
+SQLite's 64-bit integer) or a slow query.
+
+**A2. Every list endpoint is paginated: `limit` in `1..max`, `offset >= 0`.** *Enforced.*
+Reject out-of-range values with a 422 instead of clamping them silently.
+*Why:* one request must not read the whole table. SQLite reads `LIMIT -1` as "no
+limit", so the lower bound matters as much as the upper.
+
+**A3. Use the right status codes, and a domain error is never a 500.** *Enforced.*
+201 created · 200 OK or dedup hit · 404 not found · 409 conflict or illegal state · 422 bad input.
+*Why:* clients branch on the code, and a 500 should mean "our bug".
+
+**A4. Every POST that creates something accepts an idempotency key.** *Enforced.*
+Same key and same body returns the original (200); same key with a different body returns 409.
+*Why:* a client that retries after a timeout must not create a duplicate.
+
+**A5. Repeating a state-changing action is safe.** *Enforced.*
+A repeat of a request that already took effect returns the current state (200) and
+writes nothing. Example: cancelling an already-cancelled task. A request that is
+impossible, such as cancelling a finished task, is still a 409.
+*Why:* clients retry on network errors and can't tell whether the first call landed.
+
+**A6. Handlers are thin: validate, call one store method, map exceptions to codes.** *Enforced (W1) + Review.*
+No SQL and no business logic in `api.py`.
+*Why:* one place for the logic, and it can be tested without HTTP.
+
+**A7. Errors always have the same shape: `{"detail": ...}`, with no stack traces or SQL.** *Enforced.*
+*Why:* clients parse one format, and internal details stay internal.
+
+**A8. Change responses only by adding.** *Review.*
+Never rename or remove a response field, or change its type, without a version bump.
+*Why:* the console and other clients rely on the field names.
 
 ## C: Connections
 

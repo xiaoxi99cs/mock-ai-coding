@@ -214,7 +214,7 @@
           <form id="submit" class="form" autocomplete="off">
             <label>type<select id="f-type"></select></label>
             <label>pool<select id="f-pool"></select></label>
-            <label>priority<input id="f-priority" type="number" value="0"></label>
+            <label>priority<input id="f-priority" type="number" value="0" min="-100" max="100"></label>
             <div class="desc" id="f-desc"></div>
             <label class="wide">payload (JSON)<textarea id="f-payload" spellcheck="false">{}</textarea></label>
             <label>max_attempts<input id="f-attempts" type="number" value="3" min="1" max="20"></label>

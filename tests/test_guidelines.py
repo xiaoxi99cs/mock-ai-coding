@@ -2,6 +2,7 @@
 
 import ast
 import re
+import typing
 import sqlite3
 from pathlib import Path
 
@@ -178,3 +179,113 @@ def test_R2_backoff_is_capped_and_jittered_for_any_attempt(tmp_path, attempt):
     assert lo.backoff(attempt) == 0.0                                  # full jitter reaches 0...
     assert hi.backoff(attempt) == pytest.approx(0.999 * ceiling)       # ...and the (capped) ceiling
     assert hi.backoff(attempt) <= cap
+
+
+# -- A: API -------------------------------------------------------------------
+
+@pytest.fixture
+def api(tmp_path):
+    app = create_app(str(tmp_path / "api.db"), start_workers=False)
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
+
+
+def test_A1_request_model_fields_are_bounded():
+    from pydantic import BaseModel
+
+    from taskconsole import api as api_mod
+
+    def has(field, *attrs):
+        return any(getattr(m, a, None) is not None for m in field.metadata for a in attrs)
+
+    offenders = []
+    for model in [v for v in vars(api_mod).values()
+                  if isinstance(v, type) and issubclass(v, BaseModel) and v is not BaseModel]:
+        validated = {n for d in model.__pydantic_decorators__.field_validators.values() for n in d.info.fields}
+        for name, f in model.model_fields.items():
+            kinds = set(typing.get_args(f.annotation)) or {f.annotation}
+            if kinds & {int, float} and not (has(f, "ge", "gt") and has(f, "le", "lt")):
+                offenders.append(f"{model.__name__}.{name}: needs lower and upper bounds")
+            if str in kinds and not has(f, "max_length"):
+                offenders.append(f"{model.__name__}.{name}: needs max_length")
+            if dict in kinds and name not in validated:
+                offenders.append(f"{model.__name__}.{name}: needs a size validator")
+    assert not offenders, f"A1: unbounded request fields: {offenders}"
+
+
+@pytest.mark.parametrize("body", [
+    {"type": "sleep", "priority": 10**30},             # used to overflow SQLite's int64 -> 500
+    {"type": "sleep", "priority": 101},
+    {"type": "sleep", "payload": {"x": "a" * 70_000}},
+    {"type": "s" * 1000},
+    {"type": "sleep", "pool": "p" * 1000},
+    {"type": "sleep", "idempotency_key": ""},
+])
+def test_A1_out_of_bounds_input_is_422(api, body):
+    assert api.post("/api/tasks", json=body).status_code == 422
+
+
+@pytest.mark.parametrize("query", ["limit=-1", "limit=0", "limit=501", "offset=-1", "status=BOGUS"])
+def test_A2_list_pagination_is_bounded(api, query):
+    for _ in range(3):
+        api.post("/api/tasks", json={"type": "sleep"})
+    assert api.get(f"/api/tasks?{query}").status_code == 422
+
+
+def test_A2_valid_pages(api):
+    ids = [api.post("/api/tasks", json={"type": "sleep"}).json()["id"] for _ in range(3)]
+    assert len(api.get("/api/tasks?limit=500").json()) == 3
+    page = [t["id"] for t in api.get("/api/tasks?limit=2").json()] + \
+           [t["id"] for t in api.get("/api/tasks?limit=2&offset=2").json()]
+    assert sorted(page) == sorted(ids)
+    assert len(api.get("/api/tasks?status=PENDING").json()) == 3
+
+
+@pytest.mark.parametrize("method, path, body", [
+    ("post", "/api/tasks", {"type": "sleep", "priority": 2**63}),
+    ("post", "/api/tasks", {"type": "sleep", "max_attempts": "lots"}),
+    ("post", "/api/tasks", {"type": "sleep", "timeout_s": -1}),
+    ("post", "/api/tasks", {"payload": "not a dict"}),
+    ("post", "/api/tasks", None),
+    ("get", "/api/tasks?limit=abc", None),
+    ("get", "/api/tasks/" + "x" * 5000, None),
+    ("post", "/api/tasks/missing/cancel", None),
+    ("post", "/api/workers/missing/kill", None),
+    ("post", "/api/workers/missing/explode", None),
+    ("put", "/api/pools/default", {"size": 999}),
+    ("put", "/api/pools/missing", {"size": 1}),
+])
+def test_A3_A7_bad_requests_are_4xx_with_detail(api, method, path, body):
+    r = getattr(api, method)(path, **({"json": body} if body is not None else {}))
+    assert 400 <= r.status_code < 500, f"A3: {method.upper()} {path} -> {r.status_code}"
+    assert "detail" in r.json(), "A7: errors use the {'detail': ...} envelope"
+
+
+def test_A4_submit_is_idempotent_by_key(api):
+    first = api.post("/api/tasks", json={"type": "sleep", "idempotency_key": "k1"})
+    again = api.post("/api/tasks", json={"type": "sleep", "idempotency_key": "k1"})
+    other = api.post("/api/tasks", json={"type": "sleep", "payload": {"seconds": 9}, "idempotency_key": "k1"})
+    assert (first.status_code, again.status_code, other.status_code) == (201, 200, 409)
+    assert again.json()["id"] == first.json()["id"] and again.json()["deduplicated"]
+
+
+def test_A5_repeated_cancel_is_a_noop(api):
+    store = api.app.state.store
+    queued = api.post("/api/tasks", json={"type": "sleep"}).json()["id"]
+    for _ in range(2):
+        r = api.post(f"/api/tasks/{queued}/cancel")
+        assert r.status_code == 200 and r.json()["status"] == "CANCELLED"
+
+    running = api.post("/api/tasks", json={"type": "sleep"}).json()["id"]
+    t = store.claim("default", "w1")
+    store.start(running, t["fence"], "w1")
+    for _ in range(2):
+        r = api.post(f"/api/tasks/{running}/cancel")
+        assert r.status_code == 200 and r.json()["cancel_requested"]
+
+    events = [e["message"] for e in api.get(f"/api/tasks/{queued}").json()["events"]] + \
+             [e["message"] for e in api.get(f"/api/tasks/{running}").json()["events"]]
+    assert events.count("cancelled by user") == 1 and events.count("cancel requested") == 1
+
+    store.mark_cancelled(running, t["fence"], "w1")
+    assert api.post(f"/api/tasks/{running}/cancel").status_code == 200  # still a no-op once CANCELLED

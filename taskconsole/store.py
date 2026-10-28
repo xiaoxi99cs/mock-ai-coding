@@ -207,6 +207,8 @@ class TaskStore:
         with self.tx() as c:
             task = self._load(c, task_id)
             status = Status(task["status"])
+            if status == Status.CANCELLED or (status in ACTIVE and task["cancel_requested"]):
+                return _row_to_task(task)  # A5: a repeated cancel is a no-op, not an error
             if status in TERMINAL:
                 raise IllegalTransition(f"task already {status}")
             if status in ACTIVE:

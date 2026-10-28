@@ -114,10 +114,10 @@ All timestamps are store-clock epoch seconds.
 | method & path | description |
 |---|---|
 | `GET /api/task-types` | `{type: {description, example, pool}}` |
-| `POST /api/tasks` | body `{type, payload?, pool?, priority?, max_attempts? (1-20), timeout_s?, idempotency_key?}`. Returns **201** with the task, **200** with `deduplicated: true` for a repeated key, **409** for a key re-used with a different body, **422** for an unknown type or pool |
-| `GET /api/tasks?status=&pool=&limit=&offset=` | newest first (limit ≤ 500) |
+| `POST /api/tasks` | body `{type, payload? (≤ 64 KB), pool?, priority? (-100..100), max_attempts? (1-20), timeout_s? (≤ 3600), idempotency_key?}`. Returns **201** with the task, **200** with `deduplicated: true` for a repeated key, **409** for a key re-used with a different body, **422** for an unknown type or pool |
+| `GET /api/tasks?status=&pool=&limit=&offset=` | newest first; `limit` 1-500 (default 100), `offset` ≥ 0, `status` must be a valid status (else **422**) |
 | `GET /api/tasks/{id}` | the task plus `events` (its full timeline; `kind` is `transition`, `info` or `rejected`, and each event carries `attempt`, `worker_id` and `fence`) |
-| `POST /api/tasks/{id}/cancel` | queued: CANCELLED at once. Running: sets `cancel_requested` and the worker stops it at its next heartbeat. **409** if the task is already terminal |
+| `POST /api/tasks/{id}/cancel` | queued: CANCELLED at once. Running: sets `cancel_requested` and the worker stops it at its next heartbeat. Repeating a cancel is a no-op (200, current state). **409** if the task already finished (SUCCEEDED, FAILED or DEAD) |
 
 A task row has: `id, type, pool, status, attempts, max_attempts, progress, error, result,
 lease_expires_at, run_after, fence, worker_id, cancel_requested, created_at, started_at,

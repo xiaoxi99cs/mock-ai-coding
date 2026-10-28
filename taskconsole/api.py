@@ -1,29 +1,40 @@
 """REST API + static web console."""
 
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import demos, handlers, metrics
-from .states import IllegalTransition
+from .states import IllegalTransition, Status
 from .store import IdempotencyConflict, TaskNotFound, TaskStore
 from .supervisor import Supervisor
 
 STATIC = Path(__file__).parent / "static"
 DEFAULT_POOLS = {"default": 3, "cpu": 2}
+MAX_PAYLOAD_BYTES = 64 * 1024
+MAX_PAGE = 500
 
 
 class SubmitRequest(BaseModel):
-    type: str
+    # A1: every field is bounded, so bad input is a 422 and never reaches SQLite as a 500.
+    type: str = Field(max_length=64)
     payload: dict = Field(default_factory=dict)
-    pool: str | None = None
-    priority: int = 0
+    pool: str | None = Field(None, max_length=64)
+    priority: int = Field(0, ge=-100, le=100)
     max_attempts: int = Field(3, ge=1, le=20)
     timeout_s: float = Field(60, gt=0, le=3600)
-    idempotency_key: str | None = Field(None, max_length=200)
+    idempotency_key: str | None = Field(None, min_length=1, max_length=200)
+
+    @field_validator("payload")
+    @classmethod
+    def payload_size(cls, v):
+        if len(json.dumps(v)) > MAX_PAYLOAD_BYTES:
+            raise ValueError(f"payload larger than {MAX_PAYLOAD_BYTES} bytes")
+        return v
 
 
 class PoolSize(BaseModel):
@@ -75,8 +86,10 @@ def create_app(db_path: str = "tasks.db", start_workers: bool = True, pools: dic
         return {**task, "deduplicated": not created}
 
     @app.get("/api/tasks")
-    def list_tasks(status: str | None = None, pool: str | None = None, limit: int = 100, offset: int = 0):
-        return store.list_tasks(status=status, pool=pool, limit=min(limit, 500), offset=offset)
+    def list_tasks(status: Status | None = None, pool: str | None = Query(None, max_length=64),
+                   limit: int = Query(100, ge=1, le=MAX_PAGE), offset: int = Query(0, ge=0)):
+        # A2: SQLite reads LIMIT -1 as "no limit", so the lower bound matters as much as the upper.
+        return store.list_tasks(status=status, pool=pool, limit=limit, offset=offset)
 
     @app.get("/api/tasks/{task_id}")
     def get_task(task_id: str):

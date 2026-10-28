@@ -65,8 +65,8 @@ Authentication, distributed brokers (Redis/RabbitMQ), task DAGs, cron scheduling
 WebSocket push, multiple machines.
 
 ## Conventions
-- DB access and retries follow `GUIDELINES.md` (rule IDs C*, W*, R*); `tests/test_guidelines.py`
-  enforces the checkable ones. Read it before touching `store.py`, `db.py` or any retry path.
+- The API, DB access and retries follow `GUIDELINES.md` (rule IDs A*, C*, W*, R*); `tests/test_guidelines.py`
+  enforces the checkable ones. Read it before touching `api.py`, `store.py`, `db.py` or any retry path.
 - Signal handlers only set flags; never touch the DB from one (it may interrupt a transaction).
 - Worker heartbeats must keep running during any grace period (timeout, drain), or the lease expires.
 - One clock: the store's `clock` callable (injectable in tests); all processes run on one host.
